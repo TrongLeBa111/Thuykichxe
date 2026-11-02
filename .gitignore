@@ -1,0 +1,7 @@
+node_modules/
+artifacts/
+cache/
+web/dist/
+web/node_modules/
+web/src/contract.json
+evidence/*.db
