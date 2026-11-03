@@ -185,3 +185,4 @@ form.bare { margin: 0; padding: 0; border: 0; background: none; }
   .pop-wrap { position: static; }
   .pop, .pop.wide { position: fixed; left: 16px; right: 16px; top: 64px; width: auto; max-height: 80vh; overflow: auto; }
 }
+.result-head .since { flex-basis: 100%; font-size: .9rem; color: var(--muted); }

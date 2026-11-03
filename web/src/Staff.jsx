@@ -3,7 +3,7 @@ import { write, eventArg } from "./chain.js";
 import { vinHashOf, sealHashOf } from "./lookup.js";
 import { hashDoc } from "./evidence.js";
 import { ActionForm, toUnix, accountLabel } from "./ui.jsx";
-import { ZERO, FLOOD_LABEL, CONCLUSION_LABEL } from "@shared/status.mjs";
+import { ZERO, FLOOD_LABEL, CONCLUSION_LABEL, BREAK_LABEL } from "@shared/status.mjs";
 
 const VIN = { name: "vin", label: "Số khung (VIN)" };
 const NOTE = { name: "note", label: "Ghi chú chứng từ (được hash)", optional: true };
@@ -31,6 +31,9 @@ export default function Staff({ acct, accounts }) {
       }} />,
     <ActionForm key="ca" title="Ký đính chính (thành viên khác)" fields={[{ name: "id", label: "Mã đính chính", type: "number" }]}
       run={(v) => send("coSignAmend", [+v.id], "Đã ký; sự kiện được đánh dấu đính chính.")()} />,
+    <ActionForm key="cci" title="Xác nhận phiếu tiếp nhận giấy (thành viên khác)" hint="Dùng khi chủ xe không có ví: gara đã lập phiếu tiếp nhận giấy có chữ ký chủ xe. Bạn đối chiếu phiếu rồi xác nhận; gara đề xuất không tự xác nhận được."
+      fields={[{ name: "id", label: "Mã phiếu tiếp nhận", type: "number" }]}
+      run={(v) => send("confirmCheckIn", [+v.id], "Đã xác nhận; gara được ghi sự kiện cho xe này đến khi bàn giao.")()} />,
   ];
 
   const forms = {
@@ -38,9 +41,23 @@ export default function Staff({ acct, accounts }) {
       <ActionForm key="reg" title="Đăng ký xe + đặt tem số 1"
         fields={[VIN, { name: "owner", label: "Ví chủ xe", type: "select", options: owners }, { name: "seal", label: "Số tem (đã được hội đồng phát hành)", placeholder: "Số in trên tem" }, NOTE]}
         run={(v) => send("registerVehicle", [vinHashOf(v.vin), v.owner, sealHashOf(v.seal), doc("registration", v, { seal: v.seal })], "Đã đăng ký xe và đặt tem.")()} />,
-      <ActionForm key="brk" title="Phá tem (mở máy)" hint="Chỉ hợp lệ với tem đang gắn trên đúng VIN."
-        fields={[VIN, { name: "seal", label: "Số tem đang gắn" }, { name: "note", label: "Lý do" }]}
-        run={(v) => send("breakSeal", [vinHashOf(v.vin), sealHashOf(v.seal), doc("seal-break", v, { seal: v.seal })], "Đã ghi phá tem.")()} />,
+      <ActionForm key="pci" title="Tiếp nhận bằng phiếu giấy" hint="Khi chủ xe không có ví. Lưu hash của phiếu tiếp nhận có chữ ký; cần một thành viên khác xác nhận thì mới ghi được sự kiện."
+        fields={[VIN, { name: "note", label: "Số phiếu / ghi chú phiếu tiếp nhận" }]}
+        run={async (v) => {
+          const r = await write(a, "proposeCheckIn", [vinHashOf(v.vin), doc("paper-check-in", v)]);
+          return `Đã gửi. Mã phiếu tiếp nhận: ${eventArg(r, "CheckInProposed", "id")} — gửi mã này cho một thành viên khác xác nhận.`;
+        }} />,
+      <ActionForm key="out" title="Bàn giao xe (ra khỏi xưởng)" hint="Sau khi bàn giao, gara không ghi sự kiện cho xe này nữa cho đến lần tiếp nhận sau."
+        fields={[VIN, NOTE]}
+        run={(v) => send("checkOut", [vinHashOf(v.vin), doc("check-out", v)], "Đã bàn giao xe.")()} />,
+      <ActionForm key="brk" title="Phá tem (mở máy)" hint="Chỉ với xe đang ở xưởng của bạn và tem đang gắn trên đúng xe đó."
+        fields={[VIN, { name: "seal", label: "Số tem đang gắn" },
+          { name: "reason", label: "Lý do mở máy", type: "select", options: BREAK_LABEL.slice(0, 4).map((t, i) => [i, t]) }, NOTE]}
+        run={(v) => send("breakSeal", [vinHashOf(v.vin), sealHashOf(v.seal), +v.reason, doc("seal-break", v, { seal: v.seal, reason: +v.reason })], "Đã ghi phá tem.")()} />,
+      <ActionForm key="rei" title="Kiểm tra lại và niêm phong" hint="Khi tem trên máy đã bị mở ở nơi khác (mất, rách, khác số). Hệ thống ghi nhận máy từng được mở ngoài hệ thống, kèm kết luận kiểm tra của bạn và tem mới."
+        fields={[VIN, { name: "c", label: "Kết luận kiểm tra", type: "select", options: CONCLUSION_LABEL.map((t, i) => [i, t]) },
+          { name: "seal", label: "Số tem mới" }, NOTE]}
+        run={(v) => send("reinspect", [vinHashOf(v.vin), +v.c, sealHashOf(v.seal), doc("reinspection", v, { c: +v.c, seal: v.seal })], "Đã ghi kết luận kiểm tra lại và đặt tem mới.")()} />,
       <ActionForm key="app" title="Đặt tem mới" fields={[VIN, { name: "seal", label: "Số tem mới" }, NOTE]}
         run={(v) => send("applySeal", [vinHashOf(v.vin), sealHashOf(v.seal), doc("seal-apply", v, { seal: v.seal })], "Đã đặt tem.")()} />,
       <ActionForm key="rep" title="Sửa xong" hint="Chỉ khi xe đã có ghi nhận ngập. Cờ giữ nguyên; để trống tem nếu chưa đặt tem mới."

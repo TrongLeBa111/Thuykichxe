@@ -1,7 +1,8 @@
 // Logic hiển thị dùng chung cho web và script (tính từ dữ liệu chuỗi). Theo proposal mục 5.3.
 export const ZERO = "0x" + "0".repeat(64);
 export const Role = { None: 0, Council: 1, Workshop: 2, Insurer: 3, Inspector: 4 };
-export const Kind = { Registered: 0, SealApplied: 1, SealBroken: 2, Flood: 3, Repair: 4, TotalLoss: 5, Inspection: 6, Handover: 7, OwnerReport: 8, Resolution: 9, WarrantyClaim: 10, Amendment: 11 };
+export const Kind = { Registered: 0, SealApplied: 1, SealBroken: 2, Flood: 3, Repair: 4, TotalLoss: 5, Inspection: 6, Handover: 7, OwnerReport: 8, Resolution: 9, WarrantyClaim: 10, Amendment: 11, CheckIn: 12, CheckOut: 13, Reinspection: 14 };
+export const BreakReason = { Maintenance: 0, NonFloodRepair: 1, FloodRepair: 2, EngineReplacement: 3, Unrecorded: 4 };
 export const FloodType = { Floor: 0, Engine: 1, Hydrolock: 2 };
 export const Conclusion = { NoFlood: 0, Floor: 1, Engine: 2, Hydrolock: 3 };
 export const Level = { None: 0, Watch: 1, Inspect: 2, Urgent: 3 };
@@ -10,7 +11,17 @@ export const ROLE_LABEL = ["—", "Hội đồng", "Workshop", "Insurer", "Inspe
 export const KIND_LABEL = [
   "Đăng ký xe", "Đặt tem", "Phá tem", "Ghi nhận ngập", "Sửa xong", "Tổn thất toàn bộ",
   "Mốc kiểm định", "Giao xe", "Khai báo của chủ xe", "Workshop đóng yêu cầu", "Yêu cầu bảo hành", "Đính chính",
+  "Tiếp nhận xe vào xưởng", "Bàn giao xe", "Kiểm tra lại và niêm phong",
 ];
+export const BREAK_LABEL = ["bảo dưỡng định kỳ", "sửa không liên quan ngập", "sửa do ngập / thủy kích", "thay động cơ", "đã bị mở ngoài hệ thống"];
+export const CHECKIN_LABEL = ["chủ xe ký tiếp nhận", "phiếu giấy, đã có thành viên khác xác nhận"];
+
+// ── Số khung (VIN): 17 ký tự, chữ in hoa và số, không có I, O, Q (dễ nhầm với 1 và 0).
+// Không kiểm chữ số kiểm tra ở vị trí 9 vì chỉ bắt buộc ở một số thị trường.
+export const VIN_RULE = "Số khung (VIN) phải có đúng 17 ký tự, gồm chữ in hoa và số, không có chữ I, O, Q.";
+export const normalizeVin = (v) => String(v ?? "").replace(/[\s-]/g, "").toUpperCase();
+export const isValidVin = (v) => /^[A-HJ-NPR-Z0-9]{17}$/.test(normalizeVin(v));
+
 export const FLOOD_LABEL = ["ngập sàn", "ngập máy", "thủy kích"];
 export const CONCLUSION_LABEL = ["không ngập", "ngập sàn", "ngập máy", "thủy kích"];
 export const LEVEL_LABEL = ["—", "Mức 1 – Theo dõi", "Mức 2 – Cần kiểm tra tại gara", "Mức 3 – Không khởi động lại, gọi cứu hộ"];
@@ -59,6 +70,11 @@ export const ERROR_VI = {
   NeedOtherMember: "Cần một thành viên khác với bên ghi gốc ký.",
   AlreadyAmended: "Sự kiện này đã được đính chính.",
   AmendClosed: "Đề xuất đính chính đã hoàn tất.",
+  NotInCustody: "Xe chưa được tiếp nhận vào xưởng của bạn. Cần chủ xe ký tiếp nhận hoặc phiếu tiếp nhận đã được xác nhận.",
+  NotInGarage: "Xe hiện không ở xưởng nào.",
+  NotCustodianOrOwner: "Chỉ gara đang giữ xe hoặc chủ xe mới bàn giao được.",
+  CheckInClosed: "Phiếu tiếp nhận này đã được xác nhận.",
+  InvalidReason: "Lý do phá tem không hợp lệ.",
 };
 
 export function explainError(e) {
@@ -85,10 +101,21 @@ export function computeStatus({ vehicle, records, amended = [], seenSerial }) {
 
   const seenChecked = seenSerial !== undefined;
   const sealMatch = seenChecked && vehicle.currentSeal !== ZERO && seenSerial === vehicle.currentSeal;
-  const hasInspection = records.some((r) => r.kind === Kind.Inspection);
+  const hasInspection = records.some((r) => r.kind === Kind.Inspection || r.kind === Kind.Reinspection);
+  const since = records.length ? records[0].recordedAt : 0;
+  const day = (ts) => new Date(ts * 1000).toLocaleDateString("vi-VN");
+  // Lần mở máy ngoài hệ thống đã được một gara thành viên kiểm tra lại (sau lần phát hiện cuối)?
+  const lastIdx = (pred) => { for (let i = records.length - 1; i >= 0; i--) if (pred(records[i])) return i; return -1; };
+  const lastMismatch = lastIdx((r) => r.kind === Kind.Inspection && r.sub === 1);
+  const lastRecheck = lastIdx((r) => r.kind === Kind.Reinspection);
+  const rechecked = vehicle.unrecordedOpening && lastRecheck >= 0 && lastRecheck > lastMismatch;
 
   const reasons = [];
-  if (vehicle.unrecordedOpening) reasons.push("Mốc kiểm định từng thấy tem không khớp hồ sơ.");
+  if (vehicle.unrecordedOpening && !rechecked) reasons.push("Máy từng được mở ngoài hệ thống và chưa được gara thành viên kiểm tra lại.");
+  if (rechecked) {
+    const r = records[lastRecheck];
+    reasons.push(`Máy từng được mở ngoài hệ thống; đã được kiểm tra lại và niêm phong ngày ${day(r.recordedAt)}, kết luận: ${CONCLUSION_LABEL[r.sub]}.`);
+  }
   if (seenChecked && !sealMatch) {
     reasons.push(seenSerial === ZERO ? "Trên máy không có tem." : "Số tem trên máy KHÔNG khớp tem cuối trên chuỗi.");
   }
@@ -96,7 +123,7 @@ export function computeStatus({ vehicle, records, amended = [], seenSerial }) {
   if (!hasInspection) reasons.push("Chưa có mốc kiểm định nào.");
 
   const anyFlag = vehicle.flood || vehicle.hydrolock || vehicle.totalLoss;
-  const gap = vehicle.unrecordedOpening || (seenChecked && !sealMatch);
+  const gap = (vehicle.unrecordedOpening && !rechecked) || (seenChecked && !sealMatch);
   let verdict;
   if (anyFlag) verdict = "flagged";
   else if (gap) verdict = "gap";
@@ -109,7 +136,8 @@ export function computeStatus({ vehicle, records, amended = [], seenSerial }) {
   if (vehicle.openRequest > 0) details.push(`Chủ xe đã khai báo ngập (${LEVEL_LABEL[vehicle.openRequest]}), đang chờ gara kiểm tra.`);
   if (amended.length) details.push(`${amended.length} sự kiện đã được đính chính (vẫn còn trong lịch sử).`);
 
-  return { verdict, ...VERDICT[verdict], reasons, flags, details, note: NO_RECORD_NOTE };
+  if (since) details.push(`Hồ sơ bắt đầu từ ngày ${day(since)}; hệ thống không có dữ liệu trước ngày này.`);
+  return { verdict, ...VERDICT[verdict], reasons, flags, details, since, rechecked, note: NO_RECORD_NOTE };
 }
 
 /** Đọc hồ sơ theo mốc giao xe (tình huống C): trả về nhóm trước/sau và gợi ý theo bảng mục 5.3. */

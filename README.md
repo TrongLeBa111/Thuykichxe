@@ -7,14 +7,17 @@ Prototype môn Blockchain (nhóm: Lê Bá Trọng, Hoàng Thị Diệu Hiền, �
 ## Tiến độ
 
 - [x] **Hợp đồng `FloodRecord.sol`** theo proposal (hội đồng 2/3, 4 vai trò ghi, cờ một chiều, tem niêm phong, ownerReport, bảo hành, đính chính)
-- [x] **Test Hardhat** — 34 test xanh (vòng sửa 1/3)
+- [x] **Test Hardhat** — 49 test xanh (Đợt 1, vòng sửa 1/3)
 - [x] **Dữ liệu mẫu** `seed.js` (20 xe mặc định; `node scripts/seed.js 500` tạo 500 xe)
-- [x] **Kịch bản** `scenarios.js` — A, B, C, T1, T4, T5, tem lạ: 22/22 kiểm tra đạt
+- [x] **Kịch bản** `scenarios.js` — A, B, C, T1, T3, T4, T5, tem lạ, luồng Đợt 1: 35/35 kiểm tra đạt
 - [x] Web: trang tra cứu theo VIN (`web/`, chỉ đọc, không cần ví)
-- [x] Web: trang Chủ xe (khai báo ngập, bảo hành), Ghi sự kiện (Workshop/Insurer/Inspector, đính chính), Hội đồng (đề xuất, bỏ phiếu 2/3, phát hành tem) — chọn tài khoản Hardhat để mô phỏng ví; kiểm tra tự động trên Edge 22/22
+- [x] Web: trang Chủ xe (khai báo ngập, bảo hành), Ghi sự kiện (Workshop/Insurer/Inspector, đính chính), Hội đồng (đề xuất, bỏ phiếu 2/3, phát hành tem) — chọn tài khoản Hardhat để mô phỏng ví; kiểm tra tự động trên Edge 39/39 (`npm --prefix web run e2e`)
 - [ ] Máy chủ bằng chứng (Express + SQLite) và nút kiểm tra hash (`evidence/store.js` đã có phần lưu/hash)
 - [ ] Mạng Besu QBFT 4 node bằng Docker (xem `infra/README.md`)
 - [ ] Đối chứng A (PostgreSQL + audit log), B (PostgreSQL + ECDSA) và chạy T1–T6
+- [x] **Đợt 1 theo phản biện nghiệp vụ** — tiếp nhận/bàn giao xe (kể cả phiếu giấy), lý do phá tem, niêm phong lại, "hồ sơ bắt đầu từ ngày", VIN 17 ký tự
+- [ ] Đợt 2 — chuyển chủ (mua bán cá nhân, thanh lý xe tổn thất), thay động cơ
+- [ ] Đợt 3 — phản hồi bảo hành, phản đối, thang đo ngập, vai trò đơn vị kiểm tra xe cũ
 - [ ] Đo gas, thời gian ghi/tra, điền mục [Kết quả](#kết-quả)
 
 Tài liệu kiến trúc chi tiết: [docs/kien-truc-he-thong.md](docs/kien-truc-he-thong.md).
@@ -51,13 +54,16 @@ npx hardhat node
 npx hardhat run scripts/deploy.js --network localhost
 node scripts/seed.js            # hoặc: node scripts/seed.js 500
 node scripts/scenarios.js
+
+# kiểm thử trình duyệt (cần dev server đang chạy, chuỗi mới seed)
+npm --prefix web run e2e
 ```
 
 Chạy lại từ đầu: tắt `hardhat node`, bật lại, chạy lại `deploy.js` và `seed.js`.
 Tài khoản Hardhat: `0–3` Hội đồng · `4` Đại lý A · `5` Gara C · `6` Insurer · `7` Inspector · `8–19` Chủ xe.
-Web tra cứu (sau khi đã deploy + seed): `npm --prefix web install && npm --prefix web run dev` rồi mở http://localhost:5173 (hoặc `?vin=123`, dùng cho QR trên xe).
+Web tra cứu (sau khi đã deploy + seed): `npm --prefix web install && npm --prefix web run dev` rồi mở http://localhost:5173 (hoặc `?vin=<VIN>`, dùng cho QR trên xe).
 
-Xe mẫu: `123` (A, trung thực, thủy kích 02/10/2025, tem T-004512) · `abc` (B) · `wty-001` (C) · `gap-001` (sửa lén) · `seal-001` (tem lạ) · `req-001` (yêu cầu đang mở).
+Xe minh họa (VIN giả đủ 17 ký tự, xem `shared/demo.mjs` hoặc ngăn 🧪 trên web): `RLXDEMA0000000123` (A, thủy kích đã sửa, tem T-004512) · `RLXDEMB0000000ABC` (B) · `RLXDEMC0000WTY001` (C) · `RLXDEMD0000GAP001` (sửa lén) · `RLXDEME000SEAL001` (thử tem lạ) · `RLXDEMF0000REP001` (khai báo chờ gara) · `RLXDEMG0000PAPER1` (phiếu giấy) · `RLXDEMH000RECHK01` (đã kiểm tra lại).
 
 ## Quy ước thử nghiệm
 
@@ -69,8 +75,9 @@ Mỗi lần chạy test–sửa lỗi **tối đa 3 vòng**; nếu chưa xanh th
 
 | Chỉ số | Giá trị |
 |---|---|
-| Số test xanh | 34 |
-| Kịch bản `scenarios.js` | 22/22 |
+| Số test xanh | 49 |
+| Kịch bản `scenarios.js` | 35/35 |
+| Kiểm thử trình duyệt | 39/39 |
 | Gas từng loại sự kiện | chưa đo |
 | Thời gian ghi / tra 50 sự kiện | chưa đo |
 | T1–T6 trên A/B/C | chưa chạy (cần Besu + Postgres) |
@@ -92,5 +99,6 @@ Mỗi lần chạy test–sửa lỗi **tối đa 3 vòng**; nếu chưa xanh th
 | 2026-11-02 | Web ghi sự kiện theo vai trò + hội đồng; chạy thật trên Edge (puppeteer-core): 22/22, sửa 2 lỗi (revert không giải mã, danh sách đề xuất mất tên trường) và tràn ngang ở 390px |
 | 2026-11-02 | Giao diện mới: tông xanh nước sáng + trắng, trang chủ là cổng tra cứu công khai cho người mua xe (hướng dẫn 3 bước, giải nghĩa kết luận, ô cờ cảnh báo), khu vực thành viên tách riêng (🔒); test trình duyệt 22/22 |
 | 2026-11-02 | Giao diện v2: slogan "Hồ sơ xác thực thông tin xe của bạn"; trang tra cứu chia dải toàn màn hình, chỉ hiện thông tin đã có kèm nhãn "Đã xác thực" và tên đơn vị ghi/sửa (không lộ địa chỉ ví, không lộ số tem); trang chủ xe 3 bước; test trình duyệt 33/33 |
+| 2026-11-03 | Đợt 1 theo phản biện: gara chỉ ghi cho xe đang ở xưởng mình (chủ xe ký tiếp nhận hoặc phiếu giấy + thành viên khác xác nhận), lý do phá tem chuẩn hóa, niêm phong lại sau kiểm tra, "hồ sơ bắt đầu từ ngày", VIN 17 ký tự; test 49/49, kịch bản 35/35, trình duyệt 39/39 — đều đạt ở vòng 1/3; e2e đưa vào `web/e2e/` |
 | 2026-11-02 | Giao diện v3: tài khoản mô phỏng thành biểu tượng 👤 ở góc (mở khu vực thành viên từ đó); gộp "Ghi sự kiện" + "Hội đồng" thành một trang; ngăn 🧪 chứa xe/số tem minh họa; ô nhập dùng gợi ý chung; sửa lỗi vai trò không tự cập nhật sau khi hội đồng cấp quyền; test trình duyệt 38/38 |
 | 2026-11-01 | Chuyển sang mô hình proposal: hội đồng 2/3, Workshop/Insurer/Inspector, cờ một chiều, tem niêm phong, đính chính, ownerReport; 34 test xanh vòng 1; scenarios 22/22; seed 500 xe |

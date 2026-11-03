@@ -1,7 +1,12 @@
 // Đọc hồ sơ một VIN từ hợp đồng (chỉ đọc, không cần ví). Thuần ESM, nhận contract từ ngoài để test được bằng node.
 import { id } from "ethers";
+import { normalizeVin, isValidVin, VIN_RULE } from "@shared/status.mjs";
 
-export const vinHashOf = (vin) => id(String(vin).trim().toUpperCase());
+/** VIN chuẩn hóa → vinHash. Ném lỗi (tiếng Việt) nếu VIN sai định dạng — mọi form ghi đều đi qua đây. */
+export const vinHashOf = (vin) => {
+  if (!isValidVin(vin)) throw new Error(VIN_RULE);
+  return id(normalizeVin(vin));
+};
 export const sealHashOf = (text) => id("seal:" + String(text).trim());
 
 export async function loadHistory(contract, vin) {
@@ -10,6 +15,7 @@ export async function loadHistory(contract, vin) {
   const vehicle = {
     exists: v.exists, owner: v.owner, flood: v.flood, hydrolock: v.hydrolock, totalLoss: v.totalLoss,
     unrecordedOpening: v.unrecordedOpening, openRequest: Number(v.openRequest), currentSeal: v.currentSeal,
+    custodian: v.custodian,
     handoverAt: Number(v.handoverAt), warrantyDays: Number(v.warrantyDays), sealAtHandover: v.sealAtHandover,
     handoverHash: v.handoverHash,
   };

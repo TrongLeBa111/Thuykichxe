@@ -1,7 +1,8 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { loadHistory, sealHashOf } from "./lookup.js";
 import {
-  ZERO, Kind, FLOOD_LABEL, KIND_LABEL, CONCLUSION_LABEL, LEVEL_LABEL, computeStatus, warrantyView,
+  ZERO, Kind, FLOOD_LABEL, KIND_LABEL, CONCLUSION_LABEL, LEVEL_LABEL, BREAK_LABEL, CHECKIN_LABEL,
+  computeStatus, warrantyView, isValidVin, normalizeVin, VIN_RULE,
 } from "@shared/status.mjs";
 import { reader as contract } from "./chain.js";
 import info from "./contract.json";
@@ -35,11 +36,17 @@ function buildProofs(data, org) {
   if (tl) items.push({ tone: "bad", title: "Từng bị tuyên bố tổn thất toàn bộ", detail: `Ngày ${day(tl.recordedAt)} · ${org(tl.actor)}` });
   if (v.unrecordedOpening) {
     const r = of((x) => x.kind === Kind.Inspection && x.sub === 1).at(0);
-    items.push({ tone: "bad", title: "Tem trên máy từng không khớp hồ sơ", detail: `Có thể máy đã được mở ngoài hệ thống${r ? ` · phát hiện ngày ${day(r.recordedAt)} bởi ${org(r.actor)}` : ""}` });
+    items.push({ tone: "bad", title: "Máy từng được mở ngoài hệ thống", detail: `Tem trên máy không khớp hồ sơ${r ? ` · phát hiện ngày ${day(r.recordedAt)} bởi ${org(r.actor)}` : ""}` });
   }
+  const re = of((r) => r.kind === Kind.Reinspection).at(-1);
+  if (re) items.push({ tone: re.sub ? "bad" : "ok", title: `Đã kiểm tra lại và niêm phong bởi ${org(re.actor)}`, detail: `Ngày ${day(re.recordedAt)} · kết luận: ${CONCLUSION_LABEL[re.sub]}` });
   const insp = of((r) => r.kind === Kind.Inspection).at(-1);
   if (insp) items.push({ tone: insp.sub ? "bad" : "ok", title: `Kiểm định gần nhất: ${insp.num.toLocaleString("vi-VN")} km`, detail: `Ngày ${day(insp.recordedAt)} · ${org(insp.actor)}` });
   if (v.handoverAt) items.push({ tone: "ok", title: "Có biên bản giao xe", detail: `Ngày ${day(v.handoverAt)} · bảo hành ${v.warrantyDays} ngày` });
+  if (v.custodian && v.custodian !== "0x0000000000000000000000000000000000000000") {
+    const ci = of((r) => r.kind === Kind.CheckIn).at(-1);
+    items.push({ tone: "neutral", title: `Xe đang ở xưởng của ${org(v.custodian)}`, detail: ci ? `Tiếp nhận ngày ${day(ci.recordedAt)} · ${CHECKIN_LABEL[ci.sub]}` : "Từ khi đăng ký xe" });
+  }
   if (v.openRequest > 0) items.push({ tone: "warn", title: "Chủ xe vừa khai báo xe qua vùng ngập", detail: `${LEVEL_LABEL[v.openRequest]} · đang chờ gara kiểm tra` });
   return items;
 }
@@ -54,7 +61,9 @@ function Timeline({ records, orgOf, amended, markAt }) {
     }
     const d = r.kind === Kind.Flood ? `${FLOOD_LABEL[r.sub]} · xảy ra ${day(r.occurredAt)}`
       : r.kind === Kind.OwnerReport ? `${LEVEL_LABEL[r.sub]}`
-      : r.kind === Kind.Resolution ? `Kết luận: ${CONCLUSION_LABEL[r.sub]}`
+      : r.kind === Kind.Resolution || r.kind === Kind.Reinspection ? `Kết luận: ${CONCLUSION_LABEL[r.sub]}`
+      : r.kind === Kind.SealBroken ? `Lý do: ${BREAK_LABEL[r.sub]}`
+      : r.kind === Kind.CheckIn ? `${CHECKIN_LABEL[r.sub]}`
       : r.kind === Kind.Inspection ? `${r.num.toLocaleString("vi-VN")} km · ${r.sub ? "tem không khớp hồ sơ" : "tem khớp"}`
       : r.kind === Kind.Handover ? `Bảo hành ${r.num} ngày`
       : r.kind === Kind.Amendment ? `Đính chính sự kiện số ${r.num + 1}` : "";
@@ -113,8 +122,9 @@ export default function Lookup({ preset }) {
   const [err, setErr] = useState("");
 
   async function search(v = vin, opts = {}) {
-    const q = v.trim();
+    const q = normalizeVin(v);
     if (!q) return;
+    if (!isValidVin(q)) { setData(null); setErr(VIN_RULE); return; }
     setBusy(true); setErr("");
     try {
       setData(await loadHistory(contract, q));
@@ -163,6 +173,7 @@ export default function Lookup({ preset }) {
                 <span className="muted">Kết quả cho số khung</span>
                 <span className="vin">{queried}</span>
                 <span className="muted">— hãy so với số đóng trên khung xe.</span>
+                {status.since > 0 && <span className="since">Hồ sơ bắt đầu từ ngày {day(status.since)}; hệ thống không có dữ liệu trước ngày này.</span>}
               </div>
               <div className="summary">
                 <section className={`verdict ${status.tone}`} aria-live="polite">

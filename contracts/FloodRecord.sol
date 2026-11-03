@@ -9,13 +9,16 @@ contract FloodRecord {
     enum Role { None, Council, Workshop, Insurer, Inspector }
     enum Kind {
         Registered, SealApplied, SealBroken, Flood, Repair, TotalLoss,
-        Inspection, Handover, OwnerReport, Resolution, WarrantyClaim, Amendment
+        Inspection, Handover, OwnerReport, Resolution, WarrantyClaim, Amendment,
+        CheckIn, CheckOut, Reinspection
     }
     enum FloodType { Floor, Engine, Hydrolock }          // ngập sàn, ngập máy, thủy kích
     enum Conclusion { NoFlood, Floor, Engine, Hydrolock } // kết luận của Workshop khi đóng yêu cầu
     enum Level { None, Watch, Inspect, Urgent }          // mức khuyến nghị cho khai báo của chủ xe
     enum SealState { None, Issued, Applied, Broken }
     enum Action { AddMember, RevokeMember, SetThresholds }
+    /// Lý do phá tem (chuẩn hóa). Unrecorded: tem đã bị mở ngoài hệ thống, chỉ ghi qua reinspect.
+    enum BreakReason { Maintenance, NonFloodRepair, FloodRepair, EngineReplacement, Unrecorded }
 
     struct Vehicle {
         bool exists;
@@ -26,13 +29,14 @@ contract FloodRecord {
         bool unrecordedOpening; // cờ một chiều: tem thấy khi kiểm định không khớp hồ sơ
         Level openRequest;      // yêu cầu kiểm tra đang mở (do khai báo của chủ xe), chưa bật cờ
         bytes32 currentSeal;    // 0 nếu hiện không có tem trên hồ sơ
+        address custodian;      // Workshop đang giữ xe (đã tiếp nhận); 0 nếu xe không ở xưởng nào
         uint64 handoverAt;
         uint32 warrantyDays;
         bytes32 sealAtHandover;
         bytes32 handoverHash;
     }
 
-    /// sub: FloodType | Level | Conclusion | (Inspection: 1 nếu tem không khớp)
+    /// sub: FloodType | Level | Conclusion | BreakReason (SealBroken) | (Inspection: 1 nếu tem không khớp) | (CheckIn: 0 chủ xe ký, 1 phiếu giấy)
     /// seal: số tem liên quan; num: km (Inspection), chỉ số bị đính chính (Amendment), số ngày bảo hành (Handover)
     struct Record {
         Kind kind;
@@ -47,6 +51,7 @@ contract FloodRecord {
 
     struct Seal { SealState state; bytes32 vinHash; }
     struct Proposal { Action action; address target; Role role; uint32 a; uint32 b; uint16 approvals; bool executed; }
+    struct PaperCheckIn { bytes32 vinHash; address workshop; bytes32 paperHash; bool done; }
     struct Amend { bytes32 vinHash; uint32 index; bytes32 correctionHash; address proposer; bool done; }
 
     // ───────────── Lỗi ─────────────
@@ -79,6 +84,11 @@ contract FloodRecord {
     error NeedOtherMember();
     error AlreadyAmended();
     error AmendClosed();
+    error NotInCustody();
+    error NotInGarage();
+    error NotCustodianOrOwner();
+    error CheckInClosed();
+    error InvalidReason();
 
     // ───────────── Trạng thái ─────────────
     mapping(address => Role) public roles;
@@ -89,6 +99,7 @@ contract FloodRecord {
     Proposal[] public proposals;
     mapping(uint256 => mapping(address => bool)) private voted;
     Amend[] public amends;
+    PaperCheckIn[] public paperCheckIns;
 
     mapping(bytes32 => Vehicle) private vehicles;
     mapping(bytes32 => Record[]) private records;
@@ -102,6 +113,8 @@ contract FloodRecord {
     event ProposalExecuted(uint256 indexed id);
     event SealsIssued(uint256 count);
     event AmendProposed(uint256 indexed id, bytes32 indexed vinHash, uint32 index, address proposer);
+    event CheckInProposed(uint256 indexed id, bytes32 indexed vinHash, address workshop);
+    event CheckInConfirmed(uint256 indexed id, address indexed coSigner);
     event AmendSigned(uint256 indexed id, address indexed coSigner);
 
     constructor(address[] memory initialCouncil) {
@@ -192,6 +205,7 @@ contract FloodRecord {
     }
 
     function proposalCount() external view returns (uint256) { return proposals.length; }
+    function paperCheckInCount() external view returns (uint256) { return paperCheckIns.length; }
 
     /// @notice Hội đồng phát hành lô số sê-ri tem; mỗi số chỉ dùng một lần trên chuỗi.
     function issueSeals(bytes32[] calldata serials) external {
@@ -222,7 +236,62 @@ contract FloodRecord {
         _push(vin, Kind.SealApplied, uint64(block.timestamp), 0, docHash, serial, 0);
     }
 
+    // ───────────── Tiếp nhận / bàn giao (neo quyền ghi của Workshop vào việc xe đang ở xưởng) ─────────────
+    /// @dev Chỉ Workshop đang giữ xe mới ghi sự kiện về xe đó. Insurer, Inspector không cần.
+    function _requireCustody(Vehicle storage v) private view {
+        if (v.custodian != msg.sender) revert NotInCustody();
+    }
+
+    function _pushAs(bytes32 vin, address actor, Kind kind, uint8 sub, bytes32 dataHash, uint64 num) private {
+        records[vin].push(Record(kind, actor, uint64(block.timestamp), uint64(block.timestamp), sub, dataHash, bytes32(0), num));
+        emit RecordAdded(vin, kind, actor, sub, dataHash);
+    }
+
+    /// @notice Chủ xe ký cho đúng một Workshop tiếp nhận xe (ví dụ quét QR tại quầy).
+    /// Bản ghi CheckIn có actor = Workshop tiếp nhận, sub = 0 (chủ xe ký).
+    function checkIn(bytes32 vin, address workshop, bytes32 docHash) external {
+        Vehicle storage v = _vehicle(vin);
+        if (msg.sender != v.owner) revert NotVehicleOwner();
+        if (roles[workshop] != Role.Workshop) revert InvalidRole();
+        v.custodian = workshop;
+        _pushAs(vin, workshop, Kind.CheckIn, 0, docHash, 0);
+    }
+
+    /// @notice Đường dự phòng khi chủ xe không có ví: Workshop đề xuất kèm hash phiếu tiếp nhận giấy có chữ ký.
+    function proposeCheckIn(bytes32 vin, bytes32 paperHash)
+        external onlyRole(Role.Workshop, NotWorkshop.selector) returns (uint256 id)
+    {
+        _vehicle(vin);
+        if (paperHash == bytes32(0)) revert EmptyInput();
+        id = paperCheckIns.length;
+        paperCheckIns.push(PaperCheckIn(vin, msg.sender, paperHash, false));
+        emit CheckInProposed(id, vin, msg.sender);
+    }
+
+    /// @notice Một thành viên khác (không phải Workshop đề xuất) xác nhận phiếu giấy. sub = 1, num = mã phiếu.
+    function confirmCheckIn(uint256 id) external {
+        PaperCheckIn storage p = paperCheckIns[id];
+        if (p.done) revert CheckInClosed();
+        if (roles[msg.sender] == Role.None) revert NotMember();
+        if (msg.sender == p.workshop) revert NeedOtherMember();
+        if (roles[p.workshop] != Role.Workshop) revert InvalidRole(); // Workshop có thể đã bị thu hồi
+        p.done = true;
+        vehicles[p.vinHash].custodian = p.workshop;
+        _pushAs(p.vinHash, p.workshop, Kind.CheckIn, 1, p.paperHash, uint64(id));
+        emit CheckInConfirmed(id, msg.sender);
+    }
+
+    /// @notice Bàn giao xe ra khỏi xưởng: do Workshop đang giữ xe hoặc chủ xe (nhận xe về) ghi.
+    function checkOut(bytes32 vin, bytes32 docHash) external {
+        Vehicle storage v = _vehicle(vin);
+        if (v.custodian == address(0)) revert NotInGarage();
+        if (msg.sender != v.custodian && msg.sender != v.owner) revert NotCustodianOrOwner();
+        v.custodian = address(0);
+        _push(vin, Kind.CheckOut, uint64(block.timestamp), 0, docHash, bytes32(0), 0);
+    }
+
     // ───────────── Workshop ─────────────
+    /// @notice Đăng ký xe — Workshop đăng ký mặc nhiên đang giữ xe (xe đang ở đại lý/gara đó).
     function registerVehicle(bytes32 vin, address owner, bytes32 serial, bytes32 docHash)
         external onlyRole(Role.Workshop, NotWorkshop.selector)
     {
@@ -231,6 +300,7 @@ contract FloodRecord {
         if (v.exists) revert VehicleExists();
         v.exists = true;
         v.owner = owner;
+        v.custodian = msg.sender;
         _push(vin, Kind.Registered, uint64(block.timestamp), 0, docHash, bytes32(0), 0);
         _applySeal(vin, v, serial, docHash);
     }
@@ -238,18 +308,27 @@ contract FloodRecord {
     function applySeal(bytes32 vin, bytes32 serial, bytes32 docHash)
         external onlyRole(Role.Workshop, NotWorkshop.selector)
     {
-        _applySeal(vin, _vehicle(vin), serial, docHash);
+        Vehicle storage v = _vehicle(vin);
+        _requireCustody(v);
+        _applySeal(vin, v, serial, docHash);
     }
 
-    function breakSeal(bytes32 vin, bytes32 serial, bytes32 reasonHash)
-        external onlyRole(Role.Workshop, NotWorkshop.selector)
-    {
-        Vehicle storage v = _vehicle(vin);
+    function _breakSeal(bytes32 vin, Vehicle storage v, bytes32 serial, BreakReason reason, bytes32 reasonHash) private {
         Seal storage s = seals[serial];
         if (s.state != SealState.Applied || s.vinHash != vin || v.currentSeal != serial) revert WrongSeal();
         s.state = SealState.Broken;
         v.currentSeal = bytes32(0);
-        _push(vin, Kind.SealBroken, uint64(block.timestamp), 0, reasonHash, serial, 0);
+        _push(vin, Kind.SealBroken, uint64(block.timestamp), uint8(reason), reasonHash, serial, 0);
+    }
+
+    /// @param reason lý do chuẩn hóa; `Unrecorded` chỉ dùng nội bộ khi kiểm tra lại
+    function breakSeal(bytes32 vin, bytes32 serial, BreakReason reason, bytes32 reasonHash)
+        external onlyRole(Role.Workshop, NotWorkshop.selector)
+    {
+        if (reason == BreakReason.Unrecorded) revert InvalidReason();
+        Vehicle storage v = _vehicle(vin);
+        _requireCustody(v);
+        _breakSeal(vin, v, serial, reason, reasonHash);
     }
 
     /// @param newSerial 0 nếu không đặt tem mới ngay
@@ -257,9 +336,30 @@ contract FloodRecord {
         external onlyRole(Role.Workshop, NotWorkshop.selector)
     {
         Vehicle storage v = _vehicle(vin);
+        _requireCustody(v);
         if (!v.flood) revert NoFloodFlag();
         _push(vin, Kind.Repair, uint64(block.timestamp), 0, docHash, newSerial, 0);
         if (newSerial != bytes32(0)) _applySeal(vin, v, newSerial, docHash);
+    }
+
+    /// @notice Niêm phong lại sau kiểm tra: tem đã bị mở ngoài hệ thống (mất, rách, khác số).
+    /// Gara đang giữ xe kiểm tra, ghi kết luận, đánh dấu tem cũ (nếu còn trên hồ sơ) là "phá ngoài
+    /// hệ thống", rồi đặt tem mới. Cờ "mở máy không ghi nhận" bật (một chiều) vì đó là sự thật đã xảy ra;
+    /// trang tra cứu hiện thêm kết luận kiểm tra lại để không xếp chung với xe sửa lén chưa kiểm tra.
+    function reinspect(bytes32 vin, Conclusion c, bytes32 newSerial, bytes32 docHash)
+        external onlyRole(Role.Workshop, NotWorkshop.selector)
+    {
+        Vehicle storage v = _vehicle(vin);
+        _requireCustody(v);
+        if (newSerial == bytes32(0)) revert EmptyInput();
+        if (v.currentSeal != bytes32(0)) _breakSeal(vin, v, v.currentSeal, BreakReason.Unrecorded, docHash);
+        v.unrecordedOpening = true;
+        if (c != Conclusion.NoFlood) {
+            v.flood = true;
+            if (c == Conclusion.Hydrolock) v.hydrolock = true;
+        }
+        _push(vin, Kind.Reinspection, uint64(block.timestamp), uint8(c), docHash, newSerial, 0);
+        _applySeal(vin, v, newSerial, docHash);
     }
 
     /// @notice Workshop kiểm tra sau khai báo của chủ xe: đóng yêu cầu và ghi kết luận.
@@ -267,6 +367,7 @@ contract FloodRecord {
         external onlyRole(Role.Workshop, NotWorkshop.selector)
     {
         Vehicle storage v = _vehicle(vin);
+        _requireCustody(v);
         if (v.openRequest == Level.None) revert NoOpenRequest();
         if (c != Conclusion.NoFlood) {
             v.flood = true;
@@ -276,12 +377,15 @@ contract FloodRecord {
         _push(vin, Kind.Resolution, uint64(block.timestamp), uint8(c), docHash, v.currentSeal, 0);
     }
 
+    /// @notice Giao xe kèm bảo hành; đồng thời là bàn giao xe ra khỏi xưởng.
     function handover(bytes32 vin, address newOwner, uint32 warrantyDays, bytes32 docHash)
         external onlyRole(Role.Workshop, NotWorkshop.selector)
     {
         Vehicle storage v = _vehicle(vin);
+        _requireCustody(v);
         if (newOwner == address(0)) revert EmptyInput();
         v.owner = newOwner;
+        v.custodian = address(0);
         v.handoverAt = uint64(block.timestamp);
         v.warrantyDays = warrantyDays;
         v.sealAtHandover = v.currentSeal; // hợp đồng tự đọc, không nhận từ người gọi
@@ -290,10 +394,12 @@ contract FloodRecord {
     }
 
     // ───────────── Insurer / Workshop: ghi ngập ─────────────
+    /// @notice Insurer ghi theo hồ sơ bồi thường (không cần tiếp nhận); Workshop phải đang giữ xe.
     function reportFlood(bytes32 vin, FloodType t, uint64 occurredAt, bytes32 docHash) external {
         Role r = roles[msg.sender];
         if (r != Role.Insurer && r != Role.Workshop) revert NotInsurerOrWorkshop();
         Vehicle storage v = _vehicle(vin);
+        if (r == Role.Workshop) _requireCustody(v);
         if (occurredAt > block.timestamp) revert FutureTime();
         v.flood = true;
         if (t == FloodType.Hydrolock) v.hydrolock = true;

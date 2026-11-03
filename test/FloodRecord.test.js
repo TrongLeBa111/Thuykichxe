@@ -11,6 +11,8 @@ const FT = { Floor: 0, Engine: 1, Hydrolock: 2 };
 const Concl = { NoFlood: 0, Floor: 1, Engine: 2, Hydrolock: 3 };
 const Level = { None: 0, Watch: 1, Inspect: 2, Urgent: 3 };
 const ZERO = ethers.ZeroHash;
+const BR = { Maintenance: 0, NonFloodRepair: 1, FloodRepair: 2, EngineReplacement: 3, Unrecorded: 4 };
+Kind.CheckIn = 12; Kind.CheckOut = 13; Kind.Reinspection = 14;
 
 describe("FloodRecord (VehicleHistory theo proposal)", () => {
   let c, council, wsA, wsB, insurer, inspector, owner1, owner2, stranger;
@@ -101,18 +103,18 @@ describe("FloodRecord (VehicleHistory theo proposal)", () => {
     it("breakSeal chỉ hợp lệ với tem đang gắn trên đúng VIN", async () => {
       await reg();
       await reg(vh("XYZ"), "S2", owner2);
-      await expect(c.connect(wsA).breakSeal(VIN, sn("S2"), H("r"))).to.be.revertedWithCustomError(c, "WrongSeal"); // tem của xe khác
-      await expect(c.connect(wsA).breakSeal(VIN, sn("S3"), H("r"))).to.be.revertedWithCustomError(c, "WrongSeal"); // chưa gắn
-      await expect(c.connect(owner1).breakSeal(VIN, sn("S1"), H("r"))).to.be.revertedWithCustomError(c, "NotWorkshop");
-      await c.connect(wsA).breakSeal(VIN, sn("S1"), H("r"));
+      await expect(c.connect(wsA).breakSeal(VIN, sn("S2"), BR.FloodRepair, H("r"))).to.be.revertedWithCustomError(c, "WrongSeal"); // tem của xe khác
+      await expect(c.connect(wsA).breakSeal(VIN, sn("S3"), BR.FloodRepair, H("r"))).to.be.revertedWithCustomError(c, "WrongSeal"); // chưa gắn
+      await expect(c.connect(owner1).breakSeal(VIN, sn("S1"), BR.FloodRepair, H("r"))).to.be.revertedWithCustomError(c, "NotWorkshop");
+      await c.connect(wsA).breakSeal(VIN, sn("S1"), BR.FloodRepair, H("r"));
       expect((await c.getVehicle(VIN)).currentSeal).to.equal(ZERO);
       expect((await c.getSeal(sn("S1"))).state).to.equal(3); // Broken
-      await expect(c.connect(wsA).breakSeal(VIN, sn("S1"), H("r"))).to.be.revertedWithCustomError(c, "WrongSeal");
+      await expect(c.connect(wsA).breakSeal(VIN, sn("S1"), BR.FloodRepair, H("r"))).to.be.revertedWithCustomError(c, "WrongSeal");
     });
     it("tem đã phá không dùng lại được; không gắn hai tem cùng lúc", async () => {
       await reg();
       await expect(c.connect(wsA).applySeal(VIN, sn("S2"), H("a"))).to.be.revertedWithCustomError(c, "SealAlreadyOnVehicle");
-      await c.connect(wsA).breakSeal(VIN, sn("S1"), H("r"));
+      await c.connect(wsA).breakSeal(VIN, sn("S1"), BR.FloodRepair, H("r"));
       await expect(c.connect(wsA).applySeal(VIN, sn("S1"), H("a"))).to.be.revertedWithCustomError(c, "SealNotAvailable");
       await c.connect(wsA).applySeal(VIN, sn("S2"), H("a"));
       expect((await c.checkSeal(VIN, sn("S2"))).match_).to.equal(true);
@@ -127,7 +129,8 @@ describe("FloodRecord (VehicleHistory theo proposal)", () => {
       await expect(c.connect(owner1).reportFlood(VIN, FT.Engine, 0, H("f"))).to.be.revertedWithCustomError(c, "NotInsurerOrWorkshop");
       await expect(c.connect(inspector).reportFlood(VIN, FT.Engine, 0, H("f"))).to.be.revertedWithCustomError(c, "NotInsurerOrWorkshop");
       await c.connect(insurer).reportFlood(VIN, FT.Floor, 0, H("f"));
-      await c.connect(wsB).reportFlood(VIN, FT.Engine, 0, H("f"));
+      await expect(c.connect(wsB).reportFlood(VIN, FT.Engine, 0, H("f"))).to.be.revertedWithCustomError(c, "NotInCustody");
+      await c.connect(wsA).reportFlood(VIN, FT.Engine, 0, H("f")); // wsA đăng ký xe nên đang giữ xe
       const v = await c.getVehicle(VIN);
       expect([v.flood, v.hydrolock]).to.deep.equal([true, false]);
     });
@@ -143,7 +146,7 @@ describe("FloodRecord (VehicleHistory theo proposal)", () => {
     });
     it("cờ không tắt được: sửa xong chỉ thêm sự kiện, cờ giữ nguyên", async () => {
       await c.connect(insurer).reportFlood(VIN, FT.Hydrolock, 0, H("f"));
-      await c.connect(wsA).breakSeal(VIN, sn("S1"), H("open"));
+      await c.connect(wsA).breakSeal(VIN, sn("S1"), BR.FloodRepair, H("open"));
       await c.connect(wsA).repairCompleted(VIN, sn("S2"), H("done"));
       const v = await c.getVehicle(VIN);
       expect([v.flood, v.hydrolock]).to.deep.equal([true, true]);
@@ -298,11 +301,141 @@ describe("FloodRecord (VehicleHistory theo proposal)", () => {
     });
   });
 
+
+  describe("Tiếp nhận / bàn giao (Đợt 1)", () => {
+    beforeEach(async () => reg());
+    const custodian = async () => (await c.getVehicle(VIN)).custodian;
+
+    it("Workshop đăng ký xe mặc nhiên đang giữ xe; bàn giao thì hết quyền ghi", async () => {
+      expect(await custodian()).to.equal(wsA.address);
+      await c.connect(wsA).checkOut(VIN, H("out"));
+      expect(await custodian()).to.equal(ethers.ZeroAddress);
+      await expect(c.connect(wsA).reportFlood(VIN, FT.Floor, 0, H("f"))).to.be.revertedWithCustomError(c, "NotInCustody");
+      await expect(c.connect(wsA).breakSeal(VIN, sn("S1"), BR.Maintenance, H("b"))).to.be.revertedWithCustomError(c, "NotInCustody");
+      expect((await c.getHistory(VIN)).at(-1).kind).to.equal(Kind.CheckOut);
+    });
+    it("gara ghi khống xe không ở xưởng mình: mọi hàm ghi của Workshop đều bị chặn", async () => {
+      await c.connect(owner1).ownerReport(VIN, 40, 10, false, 0, H("o"));
+      const calls = [
+        () => c.connect(wsB).reportFlood(VIN, FT.Hydrolock, 0, H("x")),
+        () => c.connect(wsB).breakSeal(VIN, sn("S1"), BR.FloodRepair, H("x")),
+        () => c.connect(wsB).applySeal(VIN, sn("S2"), H("x")),
+        () => c.connect(wsB).repairCompleted(VIN, ZERO, H("x")),
+        () => c.connect(wsB).resolveRequest(VIN, Concl.Hydrolock, H("x")),
+        () => c.connect(wsB).handover(VIN, owner2.address, 30, H("x")),
+        () => c.connect(wsB).reinspect(VIN, Concl.NoFlood, sn("S3"), H("x")),
+      ];
+      for (const f of calls) await expect(f()).to.be.revertedWithCustomError(c, "NotInCustody");
+      expect((await c.getVehicle(VIN)).hydrolock).to.equal(false);
+    });
+    it("chủ xe ký tiếp nhận cho đúng một Workshop; Workshop đó ghi được, Workshop cũ thì không", async () => {
+      await c.connect(owner1).checkIn(VIN, wsB.address, H("phieu"));
+      expect(await custodian()).to.equal(wsB.address);
+      const r = (await c.getHistory(VIN)).at(-1);
+      expect([Number(r.kind), r.actor, Number(r.sub)]).to.deep.equal([Kind.CheckIn, wsB.address, 0]);
+      await c.connect(wsB).reportFlood(VIN, FT.Engine, 0, H("f"));
+      await expect(c.connect(wsA).reportFlood(VIN, FT.Engine, 0, H("f"))).to.be.revertedWithCustomError(c, "NotInCustody");
+    });
+    it("chỉ chủ xe ký tiếp nhận; đích phải là Workshop", async () => {
+      await expect(c.connect(stranger).checkIn(VIN, wsB.address, H("p"))).to.be.revertedWithCustomError(c, "NotVehicleOwner");
+      await expect(c.connect(wsB).checkIn(VIN, wsB.address, H("p"))).to.be.revertedWithCustomError(c, "NotVehicleOwner");
+      await expect(c.connect(owner1).checkIn(VIN, insurer.address, H("p"))).to.be.revertedWithCustomError(c, "InvalidRole");
+      await expect(c.connect(owner1).checkIn(VIN, stranger.address, H("p"))).to.be.revertedWithCustomError(c, "InvalidRole");
+    });
+    it("bàn giao: Workshop đang giữ hoặc chủ xe; người khác bị từ chối; không ở xưởng thì báo lỗi", async () => {
+      await expect(c.connect(wsB).checkOut(VIN, H("o"))).to.be.revertedWithCustomError(c, "NotCustodianOrOwner");
+      await expect(c.connect(stranger).checkOut(VIN, H("o"))).to.be.revertedWithCustomError(c, "NotCustodianOrOwner");
+      await c.connect(owner1).checkOut(VIN, H("o")); // chủ xe nhận xe về
+      await expect(c.connect(owner1).checkOut(VIN, H("o"))).to.be.revertedWithCustomError(c, "NotInGarage");
+    });
+    it("giao xe kèm bảo hành đồng thời bàn giao xe", async () => {
+      await c.connect(wsA).handover(VIN, owner2.address, 180, H("h"));
+      expect(await custodian()).to.equal(ethers.ZeroAddress);
+    });
+    it("Insurer và Inspector ghi được khi xe không ở xưởng nào", async () => {
+      await c.connect(wsA).checkOut(VIN, H("o"));
+      await c.connect(insurer).reportFlood(VIN, FT.Hydrolock, 0, H("f"));
+      await c.connect(inspector).inspectionCheckpoint(VIN, 1000, sn("S1"), H("i"));
+      expect((await c.getVehicle(VIN)).hydrolock).to.equal(true);
+    });
+  });
+
+  describe("Tiếp nhận bằng phiếu giấy (chủ xe không có ví)", () => {
+    beforeEach(async () => { await reg(); await c.connect(wsA).checkOut(VIN, H("o")); });
+
+    it("Workshop đề xuất kèm hash phiếu; thành viên khác xác nhận thì Workshop mới giữ xe", async () => {
+      await c.connect(wsB).proposeCheckIn(VIN, H("phieu-giay"));
+      expect((await c.getVehicle(VIN)).custodian).to.equal(ethers.ZeroAddress); // chưa xác nhận
+      await expect(c.connect(wsB).reportFlood(VIN, FT.Floor, 0, H("f"))).to.be.revertedWithCustomError(c, "NotInCustody");
+      await c.connect(insurer).confirmCheckIn(0);
+      expect((await c.getVehicle(VIN)).custodian).to.equal(wsB.address);
+      const r = (await c.getHistory(VIN)).at(-1);
+      expect([Number(r.kind), r.actor, Number(r.sub), r.dataHash]).to.deep.equal([Kind.CheckIn, wsB.address, 1, H("phieu-giay")]);
+    });
+    it("Workshop không tự xác nhận phiếu của mình; người ngoài không xác nhận; không xác nhận hai lần", async () => {
+      await c.connect(wsB).proposeCheckIn(VIN, H("p"));
+      await expect(c.connect(wsB).confirmCheckIn(0)).to.be.revertedWithCustomError(c, "NeedOtherMember");
+      await expect(c.connect(owner1).confirmCheckIn(0)).to.be.revertedWithCustomError(c, "NotMember");
+      await c.connect(wsA).confirmCheckIn(0);
+      await expect(c.connect(inspector).confirmCheckIn(0)).to.be.revertedWithCustomError(c, "CheckInClosed");
+      expect(await c.paperCheckInCount()).to.equal(1n);
+    });
+    it("chỉ Workshop đề xuất phiếu; phiếu rỗng bị từ chối", async () => {
+      await expect(c.connect(insurer).proposeCheckIn(VIN, H("p"))).to.be.revertedWithCustomError(c, "NotWorkshop");
+      await expect(c.connect(wsB).proposeCheckIn(VIN, ZERO)).to.be.revertedWithCustomError(c, "EmptyInput");
+    });
+    it("Workshop bị thu hồi quyền trước khi phiếu được xác nhận thì phiếu không còn hiệu lực", async () => {
+      await c.connect(wsB).proposeCheckIn(VIN, H("p"));
+      await c.connect(council[0]).proposeRevokeMember(wsB.address);
+      const id = (await c.proposalCount()) - 1n;
+      await c.connect(council[1]).approveProposal(id);
+      await c.connect(council[2]).approveProposal(id);
+      await expect(c.connect(insurer).confirmCheckIn(0)).to.be.revertedWithCustomError(c, "InvalidRole");
+    });
+  });
+
+  describe("Lý do phá tem và niêm phong lại sau kiểm tra", () => {
+    beforeEach(async () => reg());
+
+    it("lý do phá tem được lưu ở sub; lý do 'ngoài hệ thống' không gọi trực tiếp được", async () => {
+      await expect(c.connect(wsA).breakSeal(VIN, sn("S1"), BR.Unrecorded, H("r"))).to.be.revertedWithCustomError(c, "InvalidReason");
+      await c.connect(wsA).breakSeal(VIN, sn("S1"), BR.Maintenance, H("thay gioang"));
+      const r = (await c.getHistory(VIN)).at(-1);
+      expect([Number(r.kind), Number(r.sub)]).to.deep.equal([Kind.SealBroken, BR.Maintenance]);
+      expect((await c.getVehicle(VIN)).flood).to.equal(false); // bảo dưỡng không bật cờ ngập
+    });
+    it("niêm phong lại: tem cũ ghi 'phá ngoài hệ thống', bật cờ mở máy, ghi kết luận, đặt tem mới", async () => {
+      // chủ xe thay gioăng ở gara ngoài, tem S1 bị bóc; mang xe tới gara thành viên wsB
+      await c.connect(wsA).checkOut(VIN, H("o"));
+      await c.connect(owner1).checkIn(VIN, wsB.address, H("p"));
+      await c.connect(wsB).reinspect(VIN, Concl.NoFlood, sn("S2"), H("kiem tra lai"));
+      const v = await c.getVehicle(VIN);
+      expect([v.unrecordedOpening, v.flood, v.currentSeal]).to.deep.equal([true, false, sn("S2")]);
+      expect((await c.getSeal(sn("S1"))).state).to.equal(3); // Broken
+      const h = await c.getHistory(VIN);
+      const kinds = h.slice(-3).map((r) => Number(r.kind));
+      expect(kinds).to.deep.equal([Kind.SealBroken, Kind.Reinspection, Kind.SealApplied]);
+      expect(Number(h.at(-3).sub)).to.equal(BR.Unrecorded);
+    });
+    it("niêm phong lại với kết luận thủy kích thì bật cờ; tem mới phải hợp lệ", async () => {
+      await expect(c.connect(wsA).reinspect(VIN, Concl.NoFlood, ZERO, H("x"))).to.be.revertedWithCustomError(c, "EmptyInput");
+      await expect(c.connect(wsA).reinspect(VIN, Concl.NoFlood, sn("CHUA-PHAT-HANH"), H("x"))).to.be.revertedWithCustomError(c, "SealNotAvailable");
+      await c.connect(wsA).reinspect(VIN, Concl.Hydrolock, sn("S2"), H("x"));
+      const v = await c.getVehicle(VIN);
+      expect([v.flood, v.hydrolock, v.unrecordedOpening]).to.deep.equal([true, true, true]);
+    });
+    it("niêm phong lại khi hồ sơ đã không còn tem (đã phá hợp lệ trước đó)", async () => {
+      await c.connect(wsA).breakSeal(VIN, sn("S1"), BR.NonFloodRepair, H("r"));
+      await c.connect(wsA).reinspect(VIN, Concl.NoFlood, sn("S2"), H("x"));
+      expect((await c.getVehicle(VIN)).currentSeal).to.equal(sn("S2"));
+    });
+  });
+
   describe("Kịch bản sửa lén (T5)", () => {
     it("bóc tem ngoài hệ thống → Inspector thấy mất tem → cờ bật; checkSeal báo không khớp", async () => {
       await reg();
       await c.connect(insurer).reportFlood(VIN, FT.Hydrolock, 0, H("f"));
-      await c.connect(wsA).breakSeal(VIN, sn("S1"), H("open"));
+      await c.connect(wsA).breakSeal(VIN, sn("S1"), BR.FloodRepair, H("open"));
       await c.connect(wsA).repairCompleted(VIN, sn("S2"), H("done"));
       // chủ xe mở máy ở gara ngoài, bóc tem S2 không dán lại (không có sự kiện nào trên chuỗi)
       expect((await c.checkSeal(VIN, ZERO)).match_).to.equal(false);

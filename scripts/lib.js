@@ -18,7 +18,10 @@ async function connect() {
   return { provider, signers, addrs, as, view: new Contract(info.address, info.abi, provider) };
 }
 
-const vinHash = (vin) => id(String(vin).trim().toUpperCase()); // VIN chuẩn hóa → vinHash
+// VIN chuẩn hóa (bỏ khoảng trắng, gạch nối; in hoa) → vinHash. Khớp normalizeVin trong shared/status.mjs
+const normalizeVin = (v) => String(v ?? "").replace(/[\s-]/g, "").toUpperCase();
+const isValidVin = (v) => /^[A-HJ-NPR-Z0-9]{17}$/.test(normalizeVin(v));
+const vinHash = (vin) => id(normalizeVin(vin));
 const serial = (s) => id("seal:" + s);                          // số tem in trên tem → bytes32
 const evidence = (kind, data) => put({ kind, ...data });        // lưu ngoài chuỗi, trả hash
 const wait = async (txPromise) => (await txPromise).wait();
@@ -35,6 +38,7 @@ async function load(view, vin) {
   const vehicle = {
     exists: v.exists, owner: v.owner, flood: v.flood, hydrolock: v.hydrolock, totalLoss: v.totalLoss,
     unrecordedOpening: v.unrecordedOpening, openRequest: Number(v.openRequest), currentSeal: v.currentSeal,
+    custodian: v.custodian,
     handoverAt: Number(v.handoverAt), warrantyDays: Number(v.warrantyDays), sealAtHandover: v.sealAtHandover,
     handoverHash: v.handoverHash,
   };
@@ -47,4 +51,4 @@ async function load(view, vin) {
   return { vehicle, records, amended };
 }
 
-module.exports = { info, ACC, connect, vinHash, serial, evidence, wait, nowSec, advanceDays, load };
+module.exports = { info, ACC, connect, vinHash, normalizeVin, isValidVin, serial, evidence, wait, nowSec, advanceDays, load };

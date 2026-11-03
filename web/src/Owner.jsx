@@ -2,42 +2,51 @@ import React, { useState } from "react";
 import { reader, write } from "./chain.js";
 import { vinHashOf, loadHistory } from "./lookup.js";
 import { hashDoc } from "./evidence.js";
-import { ActionForm, toUnix, accountLabel } from "./ui.jsx";
-import { computeStatus, LEVEL_LABEL, LEVEL_ADVICE } from "@shared/status.mjs";
+import { ActionForm, toUnix } from "./ui.jsx";
+import { LEVEL_LABEL, LEVEL_ADVICE, isValidVin, normalizeVin, VIN_RULE } from "@shared/status.mjs";
+import info from "./contract.json";
 
 const day = (ts) => new Date(ts * 1000).toLocaleDateString("vi-VN");
+const NOBODY = "0x0000000000000000000000000000000000000000";
+const orgName = (addr) => info.orgs?.[addr] ?? `Gara ${addr.slice(0, 6)}…${addr.slice(-4)}`;
 
-export default function Owner({ acct, presetVin = "" }) {
+export default function Owner({ acct, accounts = [], presetVin = "" }) {
   const [vin, setVin] = useState(presetVin);
-  const [found, setFound] = useState(null); // { vin, data, status, warranty }
+  const [found, setFound] = useState(null); // { vin, data, warranty }
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
+  async function load(q) {
+    const data = await loadHistory(reader, q);
+    const warranty = data.vehicle.exists ? await reader.inWarranty(vinHashOf(q)) : false;
+    setFound({ vin: q, data, warranty });
+  }
   async function check(e) {
-    e.preventDefault();
-    const q = vin.trim();
+    e?.preventDefault();
+    const q = normalizeVin(vin);
     if (!q) return;
-    setBusy(true); setErr(""); setFound(null);
-    try {
-      const data = await loadHistory(reader, q);
-      const warranty = data.vehicle.exists ? await reader.inWarranty(vinHashOf(q)) : false;
-      setFound({ vin: q.toUpperCase(), data, status: computeStatus(data), warranty });
-    } catch (ex) { setErr("Chưa đọc được dữ liệu từ hệ thống: " + (ex.shortMessage || ex.message)); }
+    setErr(""); setFound(null);
+    if (!isValidVin(q)) { setErr(VIN_RULE); return; }
+    setBusy(true);
+    try { await load(q); } catch (ex) { setErr("Chưa đọc được dữ liệu từ hệ thống: " + (ex.shortMessage || ex.message)); }
     setBusy(false);
   }
+  const reload = () => load(found.vin);
 
   const v = found?.data.vehicle;
   const exists = !!v?.exists;
   const isOwner = exists && v.owner.toLowerCase() === acct.address.toLowerCase();
   const ready = exists && isOwner;
+  const inGarage = exists && v.custodian && v.custodian !== NOBODY;
   const warrantyEnd = exists && v.handoverAt ? v.handoverAt + v.warrantyDays * 86400 : 0;
+  const workshops = accounts.filter((a) => a.role === 2).map((a) => [a.address, orgName(a.address)]);
 
   return (
     <div className="page">
       <section className="hero small">
         <div className="wrap">
           <h1>Chủ xe khai báo</h1>
-          <p className="lead">Xe của bạn vừa đi qua vùng ngập? Khai báo để nhận khuyến nghị và đưa xe đến gara kiểm tra. Cần đăng nhập bằng tài khoản chủ xe.</p>
+          <p className="lead">Xe của bạn vừa đi qua vùng ngập? Khai báo để nhận khuyến nghị, rồi cho gara tiếp nhận xe để kiểm tra. Cần đăng nhập bằng tài khoản chủ xe.</p>
         </div>
       </section>
 
@@ -46,7 +55,7 @@ export default function Owner({ acct, presetVin = "" }) {
           <h3><span className="num">1</span> Nhập mã xe để đối chiếu hồ sơ</h3>
           <form className="inline" onSubmit={check}>
             <label className="grow">Số khung (VIN)
-              <input value={vin} onChange={(e) => setVin(e.target.value)} placeholder="Nhập số khung xe (VIN)" />
+              <input value={vin} onChange={(e) => setVin(e.target.value)} placeholder="Nhập số khung xe (VIN), 17 ký tự" />
             </label>
             <button disabled={busy || !vin.trim()}>{busy ? "Đang kiểm tra…" : "Kiểm tra mã xe"}</button>
           </form>
@@ -56,6 +65,7 @@ export default function Owner({ acct, presetVin = "" }) {
             <div className="found">
               <p className="ok-text">✔ Đã tìm thấy xe {found.vin}</p>
               <p className="muted">Xe đã có hồ sơ với {found.data.records.length} sự kiện được ghi nhận.</p>
+              {inGarage && <p className="muted">Xe đang ở xưởng của {orgName(v.custodian)}.</p>}
               {v.openRequest > 0 && <p className="muted">Xe đang có một khai báo chờ gara kiểm tra ({LEVEL_LABEL[v.openRequest]}).</p>}
               {isOwner
                 ? <p className="ok-text">✔ Tài khoản của bạn là chủ xe hiện tại.</p>
@@ -83,7 +93,8 @@ export default function Owner({ acct, presetVin = "" }) {
                 const doc = hashDoc("owner-report", { vin: found.vin, depthCm: +f.depth, soakMin: +f.soak, stalled: f.stalled });
                 await write(acct.index, "ownerReport", [key, +f.depth, +f.soak, f.stalled, toUnix(f.when), doc]);
                 const lvl = Number((await reader.getVehicle(key)).openRequest);
-                return `Đã ghi nhận khai báo. ${LEVEL_LABEL[lvl]}. ${LEVEL_ADVICE[lvl]}`;
+                await reload();
+                return `Đã ghi nhận khai báo. ${LEVEL_LABEL[lvl]}. ${LEVEL_ADVICE[lvl]} Bước tiếp theo: cho gara tiếp nhận xe ở bước 3.`;
               }}
             />
           )}
@@ -91,7 +102,41 @@ export default function Owner({ acct, presetVin = "" }) {
         </section>
 
         <section className={`card step-card${ready ? "" : " locked"}`}>
-          <h3><span className="num">3</span> Yêu cầu bảo hành (nếu xe còn bảo hành)</h3>
+          <h3><span className="num">3</span> Đưa xe vào gara</h3>
+          {!ready && <p className="muted">Hoàn tất bước 1 bằng đúng tài khoản chủ xe.</p>}
+          {ready && <p className="muted">Chỉ gara bạn cho phép mới ghi được kết quả kiểm tra, phá tem hay sửa chữa cho xe của bạn, cho đến khi gara bàn giao xe hoặc bạn nhận xe về.</p>}
+          {ready && !inGarage && (
+            <ActionForm
+              key={"ci" + found.vin}
+              title=""
+              fields={[{ name: "ws", label: "Gara tiếp nhận", type: "select", options: workshops }]}
+              submit="Cho phép gara tiếp nhận xe"
+              run={async (f) => {
+                await write(acct.index, "checkIn", [vinHashOf(found.vin), f.ws, hashDoc("check-in", { vin: found.vin, ws: f.ws })]);
+                await reload();
+                return `Đã cho phép ${orgName(f.ws)} tiếp nhận xe.`;
+              }}
+            />
+          )}
+          {ready && inGarage && (
+            <ActionForm
+              key={"co" + found.vin}
+              title=""
+              fields={[]}
+              submit="Nhận xe về"
+              run={async () => {
+                const name = orgName(v.custodian);
+                await write(acct.index, "checkOut", [vinHashOf(found.vin), hashDoc("check-out", { vin: found.vin, by: "owner" })]);
+                await reload();
+                return `Đã nhận xe về từ ${name}. Gara không còn ghi được sự kiện cho xe này.`;
+              }}
+            />
+          )}
+          <p className="save-note"><b>Thông tin được lưu để xác nhận:</b> mã xe, gara được phép tiếp nhận, thời điểm tiếp nhận và nhận xe về. Không có ví? Gara có thể lập phiếu tiếp nhận giấy để bạn ký, kèm xác nhận của một đơn vị thành viên khác.</p>
+        </section>
+
+        <section className={`card step-card${ready ? "" : " locked"}`}>
+          <h3><span className="num">4</span> Yêu cầu bảo hành (nếu xe còn bảo hành)</h3>
           {!ready && <p className="muted">Hoàn tất bước 1 bằng đúng tài khoản chủ xe để gửi yêu cầu.</p>}
           {ready && !v.handoverAt && <p className="muted">Xe này chưa có biên bản giao xe nên chưa có bảo hành.</p>}
           {ready && v.handoverAt > 0 && (
