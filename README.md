@@ -17,6 +17,8 @@ Prototype môn Blockchain (nhóm: Lê Bá Trọng, Hoàng Thị Diệu Hiền, �
 - [ ] Đối chứng A (PostgreSQL + audit log), B (PostgreSQL + ECDSA) và chạy T1–T6
 - [ ] Đo gas, thời gian ghi/tra, điền mục [Kết quả](#kết-quả)
 
+Tài liệu kiến trúc chi tiết: [docs/kien-truc-he-thong.md](docs/kien-truc-he-thong.md).
+
 ## Mô hình
 
 | Vai trò | Quyền |
