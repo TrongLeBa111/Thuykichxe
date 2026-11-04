@@ -6,3 +6,4 @@ web/node_modules/
 web/src/contract.json
 evidence/*.db
 web/e2e/shots/
+img/

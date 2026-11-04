@@ -1,14 +1,14 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { loadHistory, sealHashOf } from "./lookup.js";
 import {
-  ZERO, Kind, FLOOD_LABEL, KIND_LABEL, CONCLUSION_LABEL, LEVEL_LABEL, BREAK_LABEL, CHECKIN_LABEL,
+  ZERO, Kind, FLOOD_LABEL, KIND_LABEL, CONCLUSION_LABEL, LEVEL_LABEL, SEAL_LABEL, inspectConclusion, inspectMismatch,
   computeStatus, warrantyView, isValidVin, normalizeVin, VIN_RULE,
 } from "@shared/status.mjs";
 import { reader as contract } from "./chain.js";
 import info from "./contract.json";
 
 const VERDICT_ICON = { ok: "✔", bad: "!", warn: "!", neutral: "?" };
-const ROLE_PUBLIC = ["", "Hội đồng", "Gara / đại lý được cấp phép", "Doanh nghiệp bảo hiểm", "Đơn vị đăng kiểm"];
+const ROLE_PUBLIC = ["", "Hội đồng", "Đơn vị xác nhận được cấp phép"];
 
 const day = (ts) => new Date(ts * 1000).toLocaleDateString("vi-VN");
 const dt = (ts) => new Date(ts * 1000).toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" });
@@ -20,14 +20,16 @@ function buildProofs(data, org) {
   const of = (pred) => rs.filter(pred);
   const items = [];
   const floods = of((r) => r.kind === Kind.Flood);
-  const resolutions = of((r) => r.kind === Kind.Resolution);
+  const concluded = of((r) => r.kind === Kind.Inspection && inspectConclusion(r.sub) >= 2); // kết luận có ngập
+  const byTime = (a, b) => a.recordedAt - b.recordedAt;
+  const when = (r) => (r.kind === Kind.Flood ? `Xảy ra ngày ${day(r.occurredAt)}` : `Kết luận ngày ${day(r.recordedAt)}`);
 
   if (v.hydrolock) {
-    const r = [...floods.filter((x) => x.sub === 2), ...resolutions.filter((x) => x.sub === 3)].sort((a, b) => a.recordedAt - b.recordedAt).at(-1);
-    items.push({ tone: "bad", title: "Có ghi nhận thủy kích", detail: r ? `${r.kind === Kind.Flood ? `Xảy ra ngày ${day(r.occurredAt)}` : `Gara kết luận ngày ${day(r.recordedAt)}`} · ghi nhận bởi ${org(r.actor)}` : "" });
+    const r = [...floods.filter((x) => x.sub === 2), ...concluded.filter((x) => inspectConclusion(x.sub) === 4)].sort(byTime).at(-1);
+    items.push({ tone: "bad", title: "Có ghi nhận thủy kích", detail: r ? `${when(r)} · ghi nhận bởi ${org(r.actor)}` : "" });
   } else if (v.flood) {
-    const r = [...floods, ...resolutions.filter((x) => x.sub >= 1)].sort((a, b) => a.recordedAt - b.recordedAt).at(-1);
-    items.push({ tone: "warn", title: `Có ghi nhận ${r.kind === Kind.Flood ? FLOOD_LABEL[r.sub] : CONCLUSION_LABEL[r.sub]}`, detail: `${r.kind === Kind.Flood ? `Xảy ra ngày ${day(r.occurredAt)}` : `Ngày ${day(r.recordedAt)}`} · ghi nhận bởi ${org(r.actor)}` });
+    const r = [...floods, ...concluded].sort(byTime).at(-1);
+    items.push({ tone: "warn", title: `Có ghi nhận ${r.kind === Kind.Flood ? FLOOD_LABEL[r.sub] : CONCLUSION_LABEL[inspectConclusion(r.sub)]}`, detail: `${when(r)} · ghi nhận bởi ${org(r.actor)}` });
   }
   for (const r of of((x) => x.kind === Kind.Repair)) {
     items.push({ tone: "ok", title: `Đã sửa chữa bởi ${org(r.actor)}`, detail: `Hoàn tất ngày ${day(r.recordedAt)}` });
@@ -35,18 +37,22 @@ function buildProofs(data, org) {
   const tl = of((r) => r.kind === Kind.TotalLoss).at(-1);
   if (tl) items.push({ tone: "bad", title: "Từng bị tuyên bố tổn thất toàn bộ", detail: `Ngày ${day(tl.recordedAt)} · ${org(tl.actor)}` });
   if (v.unrecordedOpening) {
-    const r = of((x) => x.kind === Kind.Inspection && x.sub === 1).at(0);
+    const r = of((x) => x.kind === Kind.Inspection && inspectMismatch(x.sub)).at(0);
     items.push({ tone: "bad", title: "Máy từng được mở ngoài hệ thống", detail: `Tem trên máy không khớp hồ sơ${r ? ` · phát hiện ngày ${day(r.recordedAt)} bởi ${org(r.actor)}` : ""}` });
   }
-  const re = of((r) => r.kind === Kind.Reinspection).at(-1);
-  if (re) items.push({ tone: re.sub ? "bad" : "ok", title: `Đã kiểm tra lại và niêm phong bởi ${org(re.actor)}`, detail: `Ngày ${day(re.recordedAt)} · kết luận: ${CONCLUSION_LABEL[re.sub]}` });
-  const insp = of((r) => r.kind === Kind.Inspection).at(-1);
-  if (insp) items.push({ tone: insp.sub ? "bad" : "ok", title: `Kiểm định gần nhất: ${insp.num.toLocaleString("vi-VN")} km`, detail: `Ngày ${day(insp.recordedAt)} · ${org(insp.actor)}` });
-  if (v.handoverAt) items.push({ tone: "ok", title: "Có biên bản giao xe", detail: `Ngày ${day(v.handoverAt)} · bảo hành ${v.warrantyDays} ngày` });
-  if (v.custodian && v.custodian !== "0x0000000000000000000000000000000000000000") {
-    const ci = of((r) => r.kind === Kind.CheckIn).at(-1);
-    items.push({ tone: "neutral", title: `Xe đang ở xưởng của ${org(v.custodian)}`, detail: ci ? `Tiếp nhận ngày ${day(ci.recordedAt)} · ${CHECKIN_LABEL[ci.sub]}` : "Từ khi đăng ký xe" });
+  const lastInsp = of((r) => r.kind === Kind.Inspection).at(-1);
+  const verdictInsp = of((r) => r.kind === Kind.Inspection && inspectConclusion(r.sub) !== 0).at(-1);
+  if (verdictInsp && v.unrecordedOpening) {
+    const c = inspectConclusion(verdictInsp.sub);
+    items.push({ tone: c >= 2 ? "bad" : "ok", title: `Đã kiểm tra lại bởi ${org(verdictInsp.actor)}`, detail: `Ngày ${day(verdictInsp.recordedAt)} · kết luận: ${CONCLUSION_LABEL[c]}` });
   }
+  if (lastInsp) items.push({ tone: inspectMismatch(lastInsp.sub) ? "bad" : "ok", title: `Kiểm tra gần nhất: ${lastInsp.num.toLocaleString("vi-VN")} km`, detail: `Ngày ${day(lastInsp.recordedAt)} · ${org(lastInsp.actor)}` });
+  const sc = of((r) => r.kind === Kind.SealChange).at(-1);
+  if (sc) items.push({ tone: "neutral", title: `Tem niêm phong thay lần cuối bởi ${org(sc.actor)}`, detail: `Ngày ${day(sc.recordedAt)} · lý do: ${SEAL_LABEL[sc.sub]}` });
+  const eng = of((r) => r.kind === Kind.EngineChange);
+  if (eng.length) items.push({ tone: "warn", title: `Đã thay động cơ ${eng.length} lần`, detail: `Gần nhất ngày ${day(eng.at(-1).recordedAt)} · ${org(eng.at(-1).actor)}` });
+  const tr = of((r) => r.kind === Kind.Transfer);
+  if (tr.length) items.push({ tone: "neutral", title: `Đã chuyển chủ ${tr.length} lần`, detail: `Gần nhất ngày ${day(tr.at(-1).recordedAt)}${v.warrantyDays ? ` · bảo hành ${v.warrantyDays} ngày` : ""}` });
   if (v.openRequest > 0) items.push({ tone: "warn", title: "Chủ xe vừa khai báo xe qua vùng ngập", detail: `${LEVEL_LABEL[v.openRequest]} · đang chờ gara kiểm tra` });
   return items;
 }
@@ -57,15 +63,13 @@ function Timeline({ records, orgOf, amended, markAt }) {
   records.forEach((r, i) => {
     if (markAt && !marked && r.recordedAt > markAt) {
       marked = true;
-      rows.push(<li key="mark" className="mark">Sau ngày giao xe</li>);
+      rows.push(<li key="mark" className="mark">Sau lần chuyển chủ gần nhất</li>);
     }
     const d = r.kind === Kind.Flood ? `${FLOOD_LABEL[r.sub]} · xảy ra ${day(r.occurredAt)}`
       : r.kind === Kind.OwnerReport ? `${LEVEL_LABEL[r.sub]}`
-      : r.kind === Kind.Resolution || r.kind === Kind.Reinspection ? `Kết luận: ${CONCLUSION_LABEL[r.sub]}`
-      : r.kind === Kind.SealBroken ? `Lý do: ${BREAK_LABEL[r.sub]}`
-      : r.kind === Kind.CheckIn ? `${CHECKIN_LABEL[r.sub]}`
-      : r.kind === Kind.Inspection ? `${r.num.toLocaleString("vi-VN")} km · ${r.sub ? "tem không khớp hồ sơ" : "tem khớp"}`
-      : r.kind === Kind.Handover ? `Bảo hành ${r.num} ngày`
+      : r.kind === Kind.SealChange ? `Lý do: ${SEAL_LABEL[r.sub]}`
+      : r.kind === Kind.Inspection ? `${r.num.toLocaleString("vi-VN")} km · ${inspectMismatch(r.sub) ? "tem không khớp hồ sơ" : "tem khớp"} · ${CONCLUSION_LABEL[inspectConclusion(r.sub)]}`
+      : r.kind === Kind.Transfer ? (r.num ? `Bảo hành ${r.num} ngày` : "Không kèm bảo hành")
       : r.kind === Kind.Amendment ? `Đính chính sự kiện số ${r.num + 1}` : "";
     rows.push(
       <li key={i} className={`ev k${r.kind}${amended.includes(i) ? " amended" : ""}`}>
@@ -146,7 +150,7 @@ export default function Lookup({ preset }) {
   const wv = useMemo(() => (data && data.vehicle.exists ? warrantyView(data) : null), [data]);
   const proofs = useMemo(() => (data && data.vehicle.exists ? buildProofs(data, orgOf) : []), [data]);
   const v = data?.vehicle;
-  const lastSeal = data?.records?.filter((r) => r.kind === Kind.SealApplied).at(-1);
+  const lastSeal = data?.records?.filter((r) => r.kind === Kind.SealChange || (r.kind === Kind.Registered && r.ref !== ZERO)).at(-1);
   const reasons = status ? status.reasons.filter((r) => status.verdict === "pending" || status.verdict === "gap" ? !r.startsWith("Chưa có mốc") : !r.startsWith("Chưa")) : [];
 
   return (
@@ -236,10 +240,10 @@ export default function Lookup({ preset }) {
           {wv && (
             <section className="band">
               <div className="wrap">
-                <h2 className="title">Theo ngày giao xe — {day(v.handoverAt)}, bảo hành {v.warrantyDays} ngày</h2>
+                <h2 className="title">Theo lần chuyển chủ gần nhất — {day(v.handoverAt)}, bảo hành {v.warrantyDays} ngày</h2>
                 <div className="cols two">
                   <div>
-                    <p className="muted">Tem lúc giao: {v.sealAtHandover === v.currentSeal ? "trùng tem hiện tại." : "KHÁC tem hiện tại."}</p>
+                    <p className="muted">Tem lúc chuyển chủ: {v.sealAtHandover === v.currentSeal ? "trùng tem hiện tại." : "KHÁC tem hiện tại."}</p>
                     {wv.hints.length > 0 && <ul>{wv.hints.map((h) => <li key={h}>{h}</li>)}</ul>}
                     <p className="note">Đây là gợi ý cách đọc hồ sơ, không phải phán quyết. Việc ai chịu chi phí theo điều khoản bảo hành hoặc giám định.</p>
                   </div>

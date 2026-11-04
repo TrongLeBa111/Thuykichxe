@@ -1,314 +1,190 @@
 # Kiến trúc hệ thống — Hồ sơ xác thực thông tin xe
 
-Tài liệu giải thích những gì nhóm đã xây cho prototype **tra cứu lịch sử ngập nước và thủy kích ô tô theo VIN trên blockchain**: các thành phần, dữ liệu, luồng nghiệp vụ, quy tắc bất biến, cách kiểm thử, và đánh giá từng phần theo góc nhìn triển khai thực tế của từng bên liên quan.
+Tài liệu giải thích prototype **tra cứu lịch sử ngập nước và thủy kích ô tô theo VIN trên blockchain**: các bên, dữ liệu, luồng nghiệp vụ, quy tắc bất biến, kiểm thử và những chỗ còn hở.
 
-> Trạng thái: **prototype chạy trên Hardhat (một node)**, đã qua **Đợt 1** chỉnh sửa theo phản biện nghiệp vụ (xem [mục 11](#11-đợt-1-chỉnh-theo-phản-biện-nghiệp-vụ)). Mạng Besu 4 node, máy chủ chứng từ và phương án đối chứng database **chưa làm** — xem [mục 9](#9-từ-prototype-tới-triển-khai-thật).
-> Cách cài đặt và chạy: xem [README](../README.md).
+> Trạng thái: prototype chạy trên Hardhat (một node), đã **thu gọn lõi** (2 nhóm thành viên thay cho 4, bỏ lớp "xe đang ở xưởng"), thêm **chuyển chủ** và **thay động cơ**. Mạng Besu 4 node, máy chủ lưu bằng chứng và phương án đối chứng database **chưa làm** (mục 9). Cách chạy: xem [README](../README.md).
 
 ---
 
-## 1. Bài toán và nguyên tắc thiết kế
+## 1. Bài toán và nguyên tắc
 
-Người mua xe cũ không kiểm tra được xe đã từng thủy kích hay bị mở máy chưa, vì bằng chứng nằm rải rác ở hãng, gara, bảo hiểm — những bên không chia sẻ cho nhau — còn người bán có lợi khi giấu.
+Người mua xe cũ không biết xe đã từng thủy kích hay bị mở máy hay chưa: bằng chứng nằm rải rác ở hãng, gara, bảo hiểm, đăng kiểm, còn người bán có lợi khi giấu.
 
-Bốn nguyên tắc chi phối mọi lựa chọn bên dưới:
-
-1. **Chỉ ghi thêm.** Không có hàm xóa hay sửa sự kiện. Sai sót được xử lý bằng một sự kiện đính chính trỏ về sự kiện cũ.
-2. **Cờ cảnh báo một chiều.** Đã bật thì không tắt; sửa xong chỉ thêm sự kiện "đã sửa".
+1. **Chỉ ghi thêm.** Không có hàm xóa hay sửa sự kiện; sai sót xử lý bằng sự kiện đính chính.
+2. **Cờ cảnh báo một chiều.** Ngập, thủy kích, tổn thất toàn bộ, mở máy ngoài hệ thống: đã bật thì không tắt, dù xe đổi chủ, sửa xong hay thay động cơ.
 3. **Không bên nào một mình quyết ai được ghi.** Quyền ghi do hội đồng cấp với ≥ 2/3 phiếu.
-4. **Hệ thống không phán xử, không chẩn đoán.** Nó chỉ cho biết những gì đã được các bên có thẩm quyền ghi nhận.
+4. **Hệ thống không phán xử.** Blockchain chỉ chứng minh *ai đã khẳng định điều gì, lúc nào, và không ai sửa lại được*. Nó không chứng minh sự thật vật lý. “Không có ghi nhận” không có nghĩa là xe chưa từng ngập.
+5. **Tối thiểu hóa số bên và số thao tác.** Mỗi vai trò, mỗi hàm ghi phải trả lời được: nó chặn được loại gian lận nào mà chi phí vận hành xứng đáng?
 
-## 2. Tổng quan kiến trúc
+## 2. Tổng quan
 
 ```mermaid
 flowchart LR
-  subgraph Trình duyệt [Web — Vite + React]
+  subgraph Web [Web — Vite + React]
     L[Tra cứu công khai<br/>không cần ví]
-    O[Chủ xe khai báo]
-    M[Khu vực thành viên<br/>ghi sự kiện + hội đồng]
+    O[Chủ xe: khai báo, chuyển chủ, bảo hành]
+    M[Khu vực thành viên<br/>Hồ sơ xe theo VIN + Hội đồng]
   end
-  S[shared/status.mjs<br/>logic kết luận, bản dịch lỗi]
-  C[(FloodRecord.sol<br/>trên Hardhat node)]
-  E[(Kho chứng từ<br/>SQLite — chỉ lưu ngoài chuỗi)]
-  D[Danh bạ đơn vị<br/>contract.json → orgs]
-  L -- đọc --> C
-  O -- ownerReport, claimWarranty --> C
-  M -- ghi theo vai trò --> C
-  L & O & M --> S
-  L --> D
-  M -. hash chứng từ .-> C
-  E -. hash .-> C
+  S[shared/status.mjs<br/>logic kết luận, dịch lỗi]
+  C[(FloodRecord.sol<br/>sổ cái)]
+  E[(Bằng chứng ngoài chuỗi<br/>ảnh, biên bản; chỉ hash lên chuỗi)]
+  L --> S --> C
+  O --> C
+  M --> C
+  M -. hash tệp .-> E
 ```
 
-| Thành phần | Vị trí | Vai trò |
-|---|---|---|
-| Hợp đồng `FloodRecord` | `contracts/FloodRecord.sol` | Sổ cái: phân quyền, xe, tem, sự kiện, cờ, bảo hành, đính chính |
-| Kiểm thử hợp đồng | `test/FloodRecord.test.js` | 49 test (Hardhat + chai) |
-| Dữ liệu minh họa | `shared/demo.mjs` | VIN, số tem, chủ xe của các xe minh họa — dùng chung cho seed, scenarios, web, e2e |
-| Kiểm thử trình duyệt | `web/e2e/run.mjs` | Puppeteer điều khiển Edge/Chrome có sẵn: `npm --prefix web run e2e` |
-| Script | `scripts/deploy.js`, `seed.js`, `scenarios.js`, `lib.js` | Triển khai + cấp quyền qua 2/3 phiếu; dữ liệu mẫu; chạy tự động các tình huống |
-| Logic dùng chung | `shared/status.mjs` | Kết luận tra cứu, nhãn tiếng Việt, dịch lỗi hợp đồng — dùng chung cho web và script |
-| Chứng từ | `evidence/hash.js`, `evidence/store.js`, `web/src/evidence.js` | Băm JSON chuẩn hóa; lưu nội dung ngoài chuỗi (SQLite) |
-| Web | `web/src/` | `Lookup` (tra cứu), `Owner` (chủ xe), `Members` = `Staff` + `Council` (thành viên), `demo.js` (dữ liệu minh họa) |
+- **Trên chuỗi:** chủ xe hiện tại, các cờ, tem hiện tại, hash số máy, lịch sử sự kiện (người ghi, thời điểm, hash chứng từ).
+- **Ngoài chuỗi:** nội dung chứng từ (ảnh vết nước, ảnh tem, biên bản giám định, phiếu bảo hành), danh bạ tên đơn vị. Chuỗi chỉ giữ hash để ai cũng kiểm tra được chứng từ không bị thay.
 
-**Trên chuỗi** chỉ có: khóa xe dạng hash, trạng thái cờ, tem (dạng hash), sự kiện (loại, bên ghi, thời điểm, hash chứng từ), bảo hành, đề xuất của hội đồng.
-**Ngoài chuỗi:** ảnh, biên bản, nội dung khai báo, tên đơn vị. Không lưu tên, số điện thoại, biển số của chủ xe ở bất kỳ đâu.
+## 3. Các bên: từ 5 vai trò xuống 2 nhóm thành viên
 
-## 3. Các bên và quyền
-
-| Vai trò | Ngoài đời | Được gọi | Không được |
+| Bên | Trước | Bây giờ | Lý do |
 |---|---|---|---|
-| Hội đồng | Đại diện các tổ chức chạy node | `proposeAddMember`, `proposeRevokeMember`, `proposeThresholds`, `approveProposal`, `issueSeals` | Ghi sự kiện về xe |
-| Workshop | Đại lý ủy quyền, gara được duyệt | `registerVehicle`; **với xe đang ở xưởng mình**: `applySeal`, `breakSeal`, `repairCompleted`, `reinspect`, `resolveRequest`, `handover`, `reportFlood`, `checkOut`; `proposeCheckIn` (phiếu giấy) | Tự cấp quyền; ghi cho xe không ở xưởng mình |
-| Insurer | Doanh nghiệp bảo hiểm | `reportFlood`, `declareTotalLoss` | Đặt/phá tem |
-| Inspector | Đơn vị đăng kiểm | `inspectionCheckpoint` | Ghi ngập |
-| Chủ xe | Địa chỉ ví đang là `owner` của xe | `ownerReport`, `claimWarranty`, `checkIn` (cho một gara tiếp nhận), `checkOut` (nhận xe về) | Ghi sự kiện hư hỏng, đóng yêu cầu |
-| Người tra cứu | Người mua, cửa hàng xe cũ | Mọi hàm `view` (miễn phí, không cần ví) | — |
+| Hội đồng | Council | **Council** | Cấp/thu hồi quyền, đổi ngưỡng, ≥ 2/3 phiếu. Không ghi dữ liệu xe (tách quyền cấp phép và quyền ghi). |
+| Gara / đại lý | Workshop | **Đơn vị xác nhận** | Ba vai trò cũ khác nhau ở *loại tổ chức*, không khác ở *quyền*. Loại đơn vị là thông tin hiển thị (danh bạ `orgs`), không phải quyền trong hợp đồng. |
+| Bảo hiểm | Insurer | **Đơn vị xác nhận** | như trên |
+| Đăng kiểm, kiểm tra xe cũ | Inspector | **Đơn vị xác nhận** | như trên |
+| Chủ xe | (ngoài vai trò) | Địa chỉ ghi trên hồ sơ xe | Khai báo, chuyển chủ, bảo hành |
+| Người mua | Người tra | Người tra | Chỉ đọc, không cần ví |
 
-Bất kỳ thành viên nào cũng **xác nhận phiếu tiếp nhận giấy** của một Workshop khác (`confirmCheckIn`). Bất kỳ thành viên nào (Workshop/Insurer/Inspector) cũng tham gia **đính chính**: bên ghi gốc đề xuất (`proposeAmend`), một thành viên khác ký (`coSignAmend`).
+Việc gộp bỏ được: `custodian`, `checkIn/checkOut`, phiếu tiếp nhận giấy, `issueSeals`, trạng thái tem Issued/Applied/Broken, 4 hàm theo vai trò. Hợp đồng từ 502 xuống còn 385 dòng, 34 lỗi tùy biến xuống 25, 15 loại sự kiện xuống 11.
 
-**Hội đồng 2/3.** Mỗi đề xuất được thực hiện khi `số phiếu × 3 ≥ số thành viên hội đồng × 2`. Với 4 thành viên cần 3 phiếu; người đề xuất tự tính 1 phiếu. Không thể thu hồi thành viên hội đồng cuối cùng.
+## 4. Dữ liệu trên chuỗi
 
-## 4. Mô hình dữ liệu
-
-### 4.1 Khóa và hash
-
-| Đối tượng | Cách tính | Ghi chú |
-|---|---|---|
-| Xe | `vinHash = keccak256(VIN chuẩn hóa)` — bỏ khoảng trắng, gạch nối, in hoa | Client chỉ nhận VIN **đúng 17 ký tự, không có I, O, Q** (`isValidVin` trong `shared/status.mjs`). Không kiểm chữ số kiểm tra ở vị trí 9 vì chỉ bắt buộc ở một số thị trường. Hợp đồng nhận `bytes32` nên không tự kiểm định dạng |
-| Số tem | `keccak256("seal:" + số in trên tem)` | Chuỗi chỉ giữ hash → trang công khai **không hiện được** số tem, người mua phải đọc trên máy |
-| Chứng từ | `keccak256(JSON chuẩn hóa)` — khóa sắp xếp, không khoảng trắng | Cùng thuật toán ở `evidence/hash.js` và `web/src/evidence.js` |
-
-### 4.2 Cấu trúc trên chuỗi
-
-- **`Vehicle`**: `owner`, `custodian` (Workshop đang giữ xe, 0 nếu không ở xưởng nào), bốn cờ một chiều (`flood`, `hydrolock`, `totalLoss`, `unrecordedOpening`), `openRequest` (mức khai báo của chủ xe đang chờ), `currentSeal`, và thông tin giao xe (`handoverAt`, `warrantyDays`, `sealAtHandover`, `handoverHash`).
-- **`Record`** (mảng chỉ thêm theo xe): `kind`, `actor`, `occurredAt` (do người khai), `recordedAt` (`block.timestamp`), `sub` (loại ngập / mức / kết luận / tem lệch), `dataHash`, `seal`, `num` (km, số ngày bảo hành, chỉ số sự kiện bị đính chính).
-- **`Seal`**: `None → Issued → Applied → Broken`, kèm `vinHash` của xe đang gắn.
-- **`Proposal`** và **`Amend`**: đề xuất của hội đồng và đề xuất đính chính.
-
-15 loại sự kiện: Đăng ký xe, Đặt tem, Phá tem, Ghi nhận ngập, Sửa xong, Tổn thất toàn bộ, Mốc kiểm định, Giao xe, Khai báo của chủ xe, Workshop đóng yêu cầu, Yêu cầu bảo hành, Đính chính, **Tiếp nhận xe vào xưởng, Bàn giao xe, Kiểm tra lại và niêm phong**.
-
-Lý do phá tem được chuẩn hóa (`BreakReason`, lưu ở `sub`): bảo dưỡng định kỳ · sửa không liên quan ngập · sửa do ngập/thủy kích · thay động cơ · đã bị mở ngoài hệ thống (chỉ ghi qua `reinspect`).
+- **Khóa xe:** `vinHash = keccak256(VIN chuẩn hóa)`; VIN 17 ký tự, in hoa, bỏ khoảng trắng/gạch nối, không có I, O, Q.
+- **Số tem / số máy** chỉ lưu dạng hash (`keccak256("seal:"+số)`, `keccak256("engine:"+số)`), bỏ khoảng trắng và in hoa trước khi hash để nhập tay không lệch.
+- **Vehicle:** chủ, 4 cờ một chiều, mức yêu cầu kiểm tra đang mở, tem hiện tại, hash số máy hiện tại, mốc chuyển chủ gần nhất (ngày, số ngày bảo hành, tem lúc chuyển).
+- **Record:** loại, người ghi, thời điểm xảy ra/ghi, `sub` (loại phụ), hash chứng từ, `ref` (số tem hoặc hash số máy), `num` (km, chỉ số đính chính, số ngày bảo hành).
+- Mỗi số tem chỉ gắn cho **một xe, một lần** (`sealVehicle`), nên tem cũ không quay lại và không dùng cho xe khác.
 
 ## 5. Luồng nghiệp vụ
 
 ### 5.1 Kết nạp thành viên
-Hội đồng #0 `proposeAddMember(addr, role)` → #1, #2 `approveProposal(id)` → đủ 3/4 phiếu thì vai trò có hiệu lực. `scripts/deploy.js` dùng đúng luồng này để cấp quyền cho 2 Workshop, 1 Insurer, 1 Inspector — không có "cửa sau" admin.
+Một thành viên hội đồng đề xuất (tính 1 phiếu); đủ 2/3 thì đơn vị được cấp quyền Đơn vị xác nhận. Thu hồi quyền cũng cần 2/3; bản ghi cũ vẫn còn.
 
-### 5.2 Vòng đời một chiếc xe
+### 5.2 Đơn vị xác nhận ghi sự kiện (mọi đơn vị có cùng quyền)
 
-```mermaid
-sequenceDiagram
-  participant HĐ as Hội đồng
-  participant W as Workshop
-  participant I as Insurer
-  participant K as Inspector
-  participant C as Chuỗi
-  participant O as Chủ xe
-  HĐ->>C: issueSeals([T-004500 …])
-  W->>C: registerVehicle(vin, owner, tem#1)
-  Note over C: Registered + SealApplied, W đang giữ xe
-  W->>C: checkOut(vin) — giao xe cho chủ
-  I->>C: reportFlood(vin, Hydrolock, 02/10/2025)
-  Note over C: bật flood + hydrolock (không tắt được)
-  O->>C: checkIn(vin, W) — cho gara tiếp nhận
-  W->>C: breakSeal(vin, tem#1, "sửa do ngập")
-  W->>C: repairCompleted(vin, tem#2)
-  Note over C: Repair + SealApplied, cờ giữ nguyên
-  W->>C: checkOut(vin) — bàn giao, hết quyền ghi
-  K->>C: inspectionCheckpoint(vin, km, số tem thấy)
-  Note over C: tem lệch hoặc mất → bật unrecordedOpening
-```
-
-### 5.3 Tiếp nhận xe vào xưởng (neo quyền ghi của Workshop)
-
-Ngoài đời, gara chỉ có quyền nói về một chiếc xe khi xe đó đang nằm trong xưởng, có phiếu tiếp nhận hoặc lệnh sửa chữa ký với chủ xe. Hợp đồng mô phỏng đúng điều đó bằng trường `custodian`:
-
-| Cách tiếp nhận | Ai làm | Ghi trên chuỗi |
+| Hàm | Dùng khi | Hiệu quả |
 |---|---|---|
-| Đăng ký xe | Workshop đăng ký | Workshop đó mặc nhiên đang giữ xe |
-| Chủ xe ký (quét QR tại quầy) | Chủ xe gọi `checkIn(vin, workshop)` | `CheckIn`, actor = Workshop, sub = 0 |
-| Phiếu giấy (chủ xe không có ví) | Workshop `proposeCheckIn(vin, hash phiếu)` → **một thành viên khác** `confirmCheckIn(id)` | `CheckIn`, actor = Workshop, sub = 1, num = mã phiếu |
+| `registerVehicle` | Đại lý/gara đăng ký xe; tem, số máy có thể bổ sung sau | Tạo hồ sơ |
+| `reportFlood` | Bảo hiểm theo hồ sơ bồi thường; gara khi tiếp nhận xe ngập | Bật cờ ngập (và thủy kích nếu loại thủy kích) |
+| `declareTotalLoss` | Quyết định bồi thường toàn bộ | Bật cờ tổn thất |
+| `inspect` | Đăng kiểm, kiểm tra xe cũ, gara sau khai báo của chủ xe | **Một lần ghi** gồm km, tem đọc được, kết luận (nếu có), tem mới (nếu dán lại) |
+| `repairCompleted` | Sửa xong sau ngập | Thêm sự kiện; **không** tắt cờ; kèm tem mới nếu có |
+| `changeSeal` | Bảo dưỡng, sửa, mở máy có chủ đích | Đổi tem, ghi lý do chuẩn hóa |
+| `changeEngine` | Thay động cơ | Ghi hash số máy mới; cờ không đổi |
+| `proposeAmend` | Đính chính sự kiện do chính mình ghi | Chờ thành viên khác ký |
 
-Từ lúc tiếp nhận đến lúc **bàn giao** (`checkOut` do gara hoặc chủ xe, hoặc `handover`), chỉ Workshop đang giữ xe mới gọi được các hàm ghi về xe. Insurer (ghi theo hồ sơ bồi thường) và Inspector không cần tiếp nhận. Workshop không tự xác nhận phiếu giấy của mình; Workshop bị thu hồi quyền trước khi phiếu được xác nhận thì phiếu mất hiệu lực.
+**`inspect` là điểm tối ưu nhập liệu chính.** Trước đây kiểm định, kiểm tra lại, đóng yêu cầu, phá tem và đặt tem là 5 hàm với 5 biểu mẫu; nay là một biểu mẫu:
+- Tem đọc được khác tem trên hồ sơ (kể cả không thấy tem) → bật cờ “mở máy ngoài hệ thống”.
+- Có kết luận (không ngập / ngập sàn / ngập máy / thủy kích) → đóng yêu cầu của chủ xe, kết luận có ngập thì bật cờ.
+- Có tem mới → ghi thêm sự kiện thay tem, lý do tự suy ra: “đã mở ngoài hệ thống” nếu tem lệch, “bảo dưỡng” nếu khớp.
 
-Điều này **chặn ghi khống** (gara ghi ngập cho xe của đối thủ) nhưng **không chặn che giấu**: gara muốn giấu chỉ cần không lập tiếp nhận. Phần che giấu vẫn chỉ phát hiện được một phần nhờ tem và mốc kiểm định.
+### 5.3 Chủ xe khai báo
+`ownerReport(độ ngập, thời gian ngâm, chết máy)` → hợp đồng phân mức 1–3 theo ngưỡng của hội đồng, mở yêu cầu kiểm tra, **không bật cờ**. Yêu cầu đóng khi một đơn vị xác nhận ghi `inspect` có kết luận. Chủ xe chỉ cần đưa xe tới một đơn vị bất kỳ được cấp phép, không còn bước “chọn gara tiếp nhận”.
 
-### 5.4 Chủ xe khai báo (tình huống B)
-`ownerReport(vin, độ ngập, thời gian ngâm, chết máy, thời điểm)` → hợp đồng tính mức khuyến nghị:
+### 5.4 Chuyển chủ (mua bán, thanh lý)
+Một hàm duy nhất `transfer(xe, chủ mới, số ngày bảo hành)` do **chính chủ xe ký**. Dùng chung cho:
+- **Bán cá nhân**: người bán ký, chủ mới nhận.
+- **Đại lý bán kèm bảo hành**: đại lý đứng tên xe trong kho, ký chuyển cho khách và cam kết bảo hành.
+- **Thanh lý xe tổn thất toàn bộ**: bảo hiểm ghi ngập + tổn thất → chủ xe ký chuyển cho bảo hiểm → bảo hiểm ký chuyển cho người mua. Các cờ đi theo xe qua mọi lần chuyển.
 
-| Điều kiện | Mức |
-|---|---|
-| Chết máy | 3 — không khởi động lại, gọi cứu hộ |
-| Ngập ≥ 30 cm hoặc ngâm ≥ 30 phút | 2 — đưa xe vào gara |
-| Còn lại | 1 — theo dõi |
+Hợp đồng ghi tem hiện tại vào lúc chuyển để so sánh khi có yêu cầu bảo hành.
 
-Khai báo **không bật cờ**, chỉ mở `openRequest` (chỉ tăng, không giảm). Chủ xe đưa xe vào gara bằng `checkIn`; chỉ Workshop **đang giữ xe** đóng được bằng `resolveRequest(vin, kết luận)`; kết luận ngập/thủy kích mới bật cờ. Ngưỡng là tham số, hội đồng đổi bằng 2/3 phiếu.
+### 5.5 Bảo hành
+Sau mỗi lần chuyển chủ có `warrantyDays`. Chủ hiện tại `claimWarranty` trong hạn; trang tra cứu so tem lúc chuyển với tem hiện tại và nêu sự kiện ngập nằm trước hay sau ngày chuyển.
 
-### 5.5 Giao xe và bảo hành (tình huống C)
-`handover(vin, chủ mới, số ngày, biên bản)` — hợp đồng **tự đọc** tem hiện tại làm `sealAtHandover` thay vì nhận từ người gọi, để bên bán không khai sai. `handover` đồng thời là bàn giao xe ra khỏi xưởng. `claimWarranty` chỉ nhận từ chủ hiện tại và trong hạn; hệ thống chỉ ghi yêu cầu, không quyết định bồi thường.
-
-### 5.6 Niêm phong lại sau kiểm tra
-
-Chủ xe thay gioăng ở gara ngoài hệ thống, tem bị bóc. Thay vì để xe mãi bị xếp "có khoảng trống" như xe sửa lén, chủ xe mang xe đến một gara thành viên: cho gara tiếp nhận → gara gọi `reinspect(vin, kết luận, tem mới)`. Hợp đồng:
-1. ghi tem cũ (nếu còn trên hồ sơ) là "đã bị mở ngoài hệ thống";
-2. bật cờ `unrecordedOpening` — một chiều, vì đó là sự thật đã xảy ra;
-3. ghi sự kiện "Kiểm tra lại và niêm phong" kèm kết luận (kết luận ngập/thủy kích thì bật cờ tương ứng);
-4. đặt tem mới.
-
-Trang tra cứu hiện dòng "đã được kiểm tra lại và niêm phong ngày …, kết luận …". Nếu sau lần kiểm tra lại không có mốc kiểm định nào phát hiện tem lệch nữa, xe không bị xếp "có khoảng trống".
+### 5.6 Thay động cơ
+`changeEngine` lưu hash số máy mới. Mục tiêu nghiệp vụ: thay động cơ là cách phổ biến để “xóa dấu vết” thủy kích, nên hệ thống **giữ cờ** và nêu rõ “đã thay động cơ N lần, gần nhất ngày …” trên trang tra cứu.
 
 ### 5.7 Đính chính
-Bên ghi gốc `proposeAmend(vin, chỉ số, hash văn bản đính chính)` → thành viên khác `coSignAmend(id)`. Kết quả: sự kiện cũ **vẫn còn**, được đánh dấu `isAmended`, và một sự kiện `Amendment` mới trỏ về nó. Cờ không tắt.
+Bên ghi gốc đề xuất, một thành viên khác ký. Sự kiện cũ vẫn còn, chỉ được đánh dấu “đã đính chính”; cờ không tắt.
 
-## 6. Quy tắc bất biến và cách bảo đảm
+## 6. Quy tắc bất biến
 
-| Quy tắc | Bảo đảm bởi | Kiểm chứng |
-|---|---|---|
-| Không xóa/sửa sự kiện, không tắt cờ | Hợp đồng không có hàm nào làm việc đó | Test quét ABI tìm `delete/remove/clear/reset/unset/disable/edit/modify` |
-| Mỗi số tem dùng một lần | `Seal.state` chỉ đi một chiều; `issueSeals` từ chối số đã tồn tại | Test tem đã phá không gắn lại được |
-| Phá tem đúng xe | `breakSeal` yêu cầu tem đang `Applied`, đúng `vinHash`, đúng `currentSeal` | Test phá tem của xe khác bị từ chối |
-| Thời điểm ghi nhận không giả được | `recordedAt = block.timestamp`; `occurredAt` không được ở tương lai | Test so `recordedAt` với block |
-| Tem lúc giao xe trung thực | `sealAtHandover` do hợp đồng đọc | Test handover |
-| Chủ xe không tự "làm sạch" | `resolveRequest` chỉ Workshop | Test chủ xe đóng yêu cầu bị từ chối |
-| Không cấp quyền đơn phương | Mọi thay đổi vai trò qua đề xuất 2/3 | Test 2/4 phiếu chưa có hiệu lực, 3/4 thì có |
-| Gara chỉ ghi cho xe đang ở xưởng mình | `_requireCustody` trong mọi hàm ghi của Workshop | Test 7 hàm ghi của gara không giữ xe đều bị chặn |
-| Phiếu giấy cần người thứ hai | `confirmCheckIn` từ chối chính Workshop đề xuất | Test tự xác nhận bị từ chối |
-| Lý do phá tem không giả "ngoài hệ thống" | `breakSeal` từ chối `Unrecorded`; chỉ `reinspect` ghi lý do này | Test lý do không hợp lệ |
-
-Lỗi dùng `custom error` (34 loại) để tiết kiệm gas và để web dịch sang tiếng Việt (`ERROR_VI` trong `shared/status.mjs`). Web gọi `staticCall` trước mỗi giao dịch để lấy được tên lỗi.
-
-## 7. Trang tra cứu: từ dữ liệu chuỗi tới kết luận
-
-`computeStatus` (trong `shared/status.mjs`) cho ra một trong bốn kết luận:
-
-| Kết luận | Điều kiện |
+| Quy tắc | Cách bảo đảm |
 |---|---|
-| **Có ghi nhận ngập, thủy kích** | Có cờ `flood`, `hydrolock` hoặc `totalLoss` |
-| **Có khoảng trống** | Cờ `unrecordedOpening` mà **chưa được kiểm tra lại** sau lần phát hiện cuối, hoặc số tem người tra nhập không khớp, hoặc xe chưa đăng ký |
-| **Không có ghi nhận, hồ sơ liên tục** | Không cờ, tem khớp, có ít nhất một mốc kiểm định, không có khai báo đang chờ |
-| **Chưa đủ căn cứ** | Các trường hợp còn lại (chưa nhập tem, chưa có kiểm định, có khai báo chờ gara) |
+| Không xóa/sửa sự kiện | Hợp đồng không có hàm xóa/sửa (test kiểm tra tên hàm) |
+| Cờ một chiều | Mọi hàm chỉ đặt `true`; đính chính, sửa xong, thay động cơ, chuyển chủ không đụng cờ |
+| Chỉ hội đồng cấp quyền, ≥ 2/3 | `approvals*3 ≥ councilSize*2`; hội đồng không ghi dữ liệu xe |
+| Tem dùng một lần, một xe | `sealVehicle[serial]` |
+| Chủ xe khai báo không bật cờ | `ownerReport` chỉ mở yêu cầu |
+| Chỉ chủ hiện tại khai báo, chuyển chủ, bảo hành | So `msg.sender` với `owner`; chủ cũ mất quyền sau khi chuyển |
+| Lý do “mở ngoài hệ thống” không chọn tay | Chỉ phát sinh qua `inspect` khi tem lệch |
+| Thời điểm xảy ra không ở tương lai | `FutureTime` |
 
-Ba mức đầu theo proposal; mức thứ tư do nhóm thêm để không kết luận "sạch" khi chưa đủ dữ liệu.
+## 7. Trang tra cứu
 
-Mọi kết quả đều kèm dòng **"Hồ sơ bắt đầu từ ngày …; hệ thống không có dữ liệu trước ngày này"** (ngày của sự kiện đầu tiên). Lý do: xe mới vào hệ thống hôm qua và xe có 5 năm lịch sử cùng có thể ra "hồ sơ liên tục"; người mua cần biết hồ sơ dài bao lâu.
+`shared/status.mjs` biến dữ liệu chuỗi thành kết luận, dùng chung cho web và script:
+- **Có ghi nhận ngập/thủy kích** nếu có bất kỳ cờ nào.
+- **Có khoảng trống** nếu tem trên máy lệch tem hồ sơ, hoặc từng có kiểm tra thấy tem lệch mà **chưa đơn vị nào kết luận lại**, hoặc xe chưa đăng ký.
+- **Hồ sơ liên tục** chỉ khi không cờ, tem khớp và có ít nhất một lần kiểm tra.
+- **Chưa đủ căn cứ** khi chưa đối chiếu tem hoặc đang có yêu cầu chờ kiểm tra.
+- Xe từng mở máy ngoài hệ thống nhưng đã được kiểm tra lại có kết luận → không bị xếp chung với sửa lén; vẫn hiện dòng “đã kiểm tra lại ngày …”.
+- Luôn hiện “Hồ sơ bắt đầu từ ngày …” để người mua biết hệ thống không có dữ liệu trước đó.
+- Số tem **không** hiển thị công khai (chống làm giả); người dùng nhập số đọc trên máy để hệ thống so.
 
-Những lựa chọn giao diện có lý do nghiệp vụ:
-- **Chỉ hiện thông tin đã có**, mỗi mục gắn nhãn "Đã xác thực"; không liệt kê "không có ghi nhận" cho từng cờ.
-- **Hiện tên đơn vị, không hiện địa chỉ ví.** Tên lấy từ danh bạ ngoài chuỗi (`orgs` trong `contract.json`, do `deploy.js` ghi).
-- **Không hiện số tem.** Nếu trang công khai số tem, kẻ gian chỉ cần in tem giả đúng số. Trang chỉ cho biết tem do ai đặt, ngày nào; người mua nhập số đọc trên máy để hệ thống so.
-- **Tra cứu không cần ví**: chỉ gọi hàm `view` qua RPC.
+## 8. Kiểm thử (giới hạn 3 vòng test-sửa)
 
-Các trang khác: **Chủ xe khai báo** (3 bước: đối chiếu mã xe và quyền chủ xe → khai báo → bảo hành, mỗi bước ghi rõ thông tin được lưu); **Khu vực thành viên** (form theo vai trò + hội đồng). Tài khoản mô phỏng ví chọn ở biểu tượng 👤; dữ liệu minh họa ở biểu tượng 🧪 (`web/src/demo.js`), tách khỏi giao diện chính.
+| Lớp | Kết quả |
+|---|---|
+| Hợp đồng (`npx hardhat test`) | 35/35, vòng 1 |
+| Kịch bản nghiệp vụ (`node scripts/scenarios.js`) | 37/37, vòng 2 (vòng 1 lỗi do hai VIN demo dài 18 ký tự, không do logic) |
+| Trình duyệt Edge (`npm --prefix web run e2e`) | 47/47, vòng 2 (vòng 1 lỗi do thông báo chuyển chủ biến mất khi biểu mẫu đóng; đã giữ thông báo ở trang) |
 
-## 8. Kiểm thử
-
-| Mức | Công cụ | Kết quả gần nhất |
-|---|---|---|
-| Hợp đồng | `npx hardhat test` | 49/49 |
-| Tình huống A, B, C, tấn công T1, T3, T4, T5 và luồng Đợt 1 | `node scripts/scenarios.js` | 35/35 điều kiện |
-| Giao diện đầu–cuối trên trình duyệt | `npm --prefix web run e2e` (Puppeteer + Edge) | 39/39, không lỗi console |
-| Quy mô (trước Đợt 1) | `node scripts/seed.js 500` | 500 xe, 1.694 giao dịch, ~3 phút |
-
-Quy ước: mỗi lần test–sửa tối đa 3 vòng; chưa xanh thì dừng và báo lại.
-
-Kiểm thử trình duyệt đã phát hiện và sửa 4 lỗi thật: lỗi revert không được giải mã; danh sách đề xuất mất tên trường khi trải (`...`) kết quả ethers; tràn ngang ở màn hình 390px; vai trò không tự cập nhật sau khi hội đồng cấp quyền.
-
-Bộ kiểm thử trình duyệt ghi lên chuỗi, nên mỗi lần chạy cần node mới + deploy + seed. Ảnh chụp lưu ở `web/e2e/shots/` (không đưa lên repo).
+Kịch bản nghiệp vụ gom theo quy trình: người mua tra cứu · chủ xe khai báo · đại lý bán kèm bảo hành · kiểm tra lại sau mở máy · thay động cơ · thanh lý xe tổn thất · kiểm soát quyền.
 
 ## 9. Từ prototype tới triển khai thật
 
-| Hạng mục | Prototype | Triển khai thật cần |
-|---|---|---|
-| Mạng | Hardhat 1 node, automine | Besu QBFT 4 node, mỗi tổ chức một node; chịu được 1 node gian |
-| Khóa | 20 tài khoản Hardhat công khai | Ví riêng từng tổ chức, quy trình đổi/thu hồi khóa |
-| Chứng từ | Hash tính ở client; kho SQLite chung | Mỗi bên tự giữ chứng từ của mình; máy chủ trả nội dung + hash để kiểm |
-| Danh bạ đơn vị | File ngoài chuỗi do script ghi | Đăng ký trên chuỗi qua hội đồng (tên, số giấy phép) |
-| Nâng cấp hợp đồng | Không có | Quy trình chuyển dữ liệu hoặc tách lưu trữ/logic |
-| Đối chứng | Chưa có | Phương án A (PostgreSQL + audit log), B (+ chữ ký ECDSA) chạy cùng kịch bản T1–T6 |
+Chưa làm: mạng **Besu QBFT 4 node**, **máy chủ lưu bằng chứng** (Express + SQLite; `evidence/store.js` đã có phần lưu/hash), **PostgreSQL** làm phương án đối chứng, đo gas/thời gian, kiểm tra mức chịu tải.
 
-## 10. Đánh giá theo góc nhìn triển khai thực tế
+Bằng chứng (ảnh) đã có đường đi: biểu mẫu cho phép đính kèm tệp, **hash tệp** đi vào hash chứng từ trên chuỗi. Nội dung tệp chưa có nơi lưu; khi làm máy chủ bằng chứng sẽ lưu tệp ở đó và nút “Kiểm tra hash” cho phép ai cũng đối chiếu.
 
-Phần này soi prototype qua góc nhìn từng bên phải vận hành nó, để biết cái gì đã đủ, cái gì còn là giả định.
+## 10. Rủi ro còn lại sau khi thu gọn (cần nói thẳng)
 
-| Góc nhìn | Đã có trong prototype | Còn thiếu khi đưa vào thực tế |
-|---|---|---|
-| **Điều hành hệ sinh thái** | Hội đồng 2/3, không có admin đơn lẻ | Ai lập hội đồng; vì sao gara chịu ghi điều bất lợi; bắt đầu từ phạm vi hẹp nào; chỉ số đo độ phủ |
-| **Vận hành** | Luồng đầy đủ: kết nạp → đăng ký → tiếp nhận → ngập → sửa → bàn giao → kiểm định → giao xe; tiếp nhận bằng phiếu giấy | Mua bán giữa cá nhân và thanh lý xe tổn thất (Đợt 2); khai báo chờ không có hạn xử lý; chưa có cách hủy tem mất/hỏng; chưa có thủ tục xác minh giấy phép trước khi bỏ phiếu |
-| **Tài chính** | Ghi rõ chi phí vận hành node là chi phí chính | Ai trả node, tem vật lý; nguồn thu (phí thành viên, phí tem, báo cáo cho cửa hàng xe cũ) |
-| **Kỹ thuật** | Hợp đồng có test, logic dùng chung web–script; VIN kiểm 17 ký tự, không I/O/Q | Chưa có nâng cấp hợp đồng; chưa có chỉ mục cho tra cứu lớn |
-| **An ninh** | Không xóa, không tắt cờ, tem dùng một lần, cấp quyền 2/3; **gara chỉ ghi cho xe đang ở xưởng mình** (chặn ghi khống) | Insurer vẫn ghi được cho mọi xe (dựa trên hồ sơ bồi thường, không kiểm được trên chuỗi); chưa có quy trình khi lộ khóa; chủ xe khai báo không giới hạn |
-| **Pháp lý** | Không lưu tên, số điện thoại, biển số; chỉ hash lên chuỗi | Địa chỉ ví + VIN vẫn có thể liên kết với người; quyền xóa dữ liệu vs sổ không xóa được (giải pháp: xóa chứng từ ngoài chuỗi); điều lệ hội đồng; trách nhiệm khi ghi sai. Cần hỏi giảng viên/luật sư về văn bản hiện hành |
-| **Dữ liệu** | 12 loại sự kiện, 3 loại ngập, 4 kết luận | Thang đo ngập thống nhất; mẫu chứng từ; nhãn "nhập bổ sung" cho dữ liệu lịch sử trước khi có hệ thống |
-| **Sản phẩm** | Tra cứu công khai, chủ xe khai báo, khu vực thành viên | Người bán trung thực chưa chia sẻ được "hồ sơ đã xác thực" (link/QR); chủ xe chưa được báo khi có sự kiện ghi lên xe mình |
-| **Hỗ trợ người dùng** | Lỗi hiển thị tiếng Việt, ghi chú "thông tin được lưu" | Kênh khiếu nại/tranh chấp; chủ xe chưa tự phản đối được một sự kiện |
+1. **Đơn vị xác nhận có thể ghi cho bất kỳ VIN nào.** Trước đây gara chỉ ghi được cho xe chủ xe ký tiếp nhận. Đổi lại: không còn bước ký tiếp nhận (chủ xe không có ví không còn là chặn), nhưng một đơn vị xấu có thể ghi cờ ngập sai. Giảm nhẹ: mọi sự kiện gắn danh tính đơn vị, hội đồng thu hồi quyền theo 2/3, đính chính cần thành viên thứ hai; hồ sơ ngập sai vẫn nằm đó (cờ một chiều) nên **quy trình khiếu nại ngoài chuỗi** là cần thiết khi triển khai thật.
+2. **Giấu thay vì ghi sai.** Hệ thống không ép ai phải ghi. Hai lớp phòng: tem niêm phong (mở máy mà không ghi thì kiểm tra thấy tem lệch) và việc bảo hiểm ghi theo hồ sơ bồi thường. Xe ngập không bồi thường, sửa gara ngoài hệ thống, không dán tem vẫn lọt.
+3. **Tem là bằng chứng gián tiếp.** Hệ thống chỉ so số tem; không phân biệt được tem thật bị bóc dán lại. Cần tem tiêu chuẩn tự hủy khi bóc (vấn đề vật lý, ngoài phạm vi code).
+4. **Cờ sai không gỡ được** theo đúng thiết kế một chiều; cần thủ tục pháp lý bên ngoài.
+5. **Mất ví chủ xe** chưa có cơ chế khôi phục (đã đề xuất, chưa làm).
 
-Ba rủi ro lớn nhất, nên trình bày thẳng khi bảo vệ:
-1. **Động lực ngược chiều**: gara sửa lén có lợi khi không ghi. Tem và mốc kiểm định chỉ phát hiện được một phần.
-2. **"Không có ghi nhận" dễ bị hiểu là "xe sạch"** khi dữ liệu còn mỏng. Trang đã có cảnh báo; nên hiện thêm độ phủ (số gara tham gia).
-3. **Quyền ghi quá rộng** — *đã xử lý một phần ở Đợt 1*: Workshop chỉ ghi cho xe đang ở xưởng mình. Còn lại: Insurer vẫn ghi được cho mọi xe, và tiếp nhận không chặn được việc gara không ghi (che giấu).
+## 11. Việc tiếp theo
 
-## 11. Đợt 1: chỉnh theo phản biện nghiệp vụ
-
-Phản biện soi prototype theo cách nghiệp vụ diễn ra ngoài đời (10 điểm, chia 3 đợt). Đợt 1 làm 4 việc:
-
-| Phản biện | Đã làm | Ở đâu |
-|---|---|---|
-| Gara ghi được cho mọi xe | Tiếp nhận / bàn giao; chủ xe ký hoặc phiếu giấy + thành viên khác xác nhận | Hợp đồng (`custodian`, `checkIn`, `proposeCheckIn`, `confirmCheckIn`, `checkOut`), trang Chủ xe bước 3, khu vực thành viên |
-| Phá tem không phải lúc nào cũng do ngập | Lý do phá tem chuẩn hóa; niêm phong lại sau kiểm tra | `BreakReason`, `reinspect`, `computeStatus` (`rechecked`), trang tra cứu |
-| Xe cũ trước khi có hệ thống | Mọi kết quả hiện "Hồ sơ bắt đầu từ ngày …" | `computeStatus` (`since`), trang tra cứu |
-| Kiểm tra VIN | 17 ký tự, không I/O/Q; VIN demo đổi sang VIN giả hợp lệ | `isValidVin`, `shared/demo.mjs` |
-
-Ghi chú khi đối chiếu phản biện với code: điểm "xe cũ mãi mãi chưa đủ căn cứ" chưa chính xác — xe có mốc kiểm định và tem khớp vẫn ra "hồ sơ liên tục". Vấn đề thật là chiều ngược lại (xe mới vào hệ thống cũng được gắn nhãn đó), nên giải pháp là hiện ngày bắt đầu hồ sơ.
-
-**Còn lại cho Đợt 2–3:** chuyển chủ hợp nhất (mua bán cá nhân, thanh lý xe tổn thất, khôi phục khi mất ví), thay động cơ gắn số máy, phản hồi bảo hành và phản đối của chủ xe, thang đo ngập chi tiết, tách vai trò đơn vị kiểm tra xe cũ khỏi đăng kiểm, ghi căn cứ đồng ý chia sẻ dữ liệu bảo hiểm.
-
-**Giả định cần xác minh ngoài thực địa** (nhóm hỏi, không tự điền): vị trí ốc chỉ mở khi đại tu hoặc thủy kích (hỏi kỹ thuật viên gara); xe tổn thất toàn bộ đi đâu sau bồi thường và biên bản giám định ngập ghi những trường gì (hỏi cán bộ bồi thường); quy trình đăng kiểm có mở nắp ca-pô và đối chiếu số máy không (hỏi trung tâm đăng kiểm).
+- Phản hồi bảo hành từ bên bán và quá hạn “chưa phản hồi”; phản đối (khiếu nại) gắn vào sự kiện.
+- Thang mức ngập chi tiết (mực nước 4 bậc, nước mặn/lợ, động cơ có chạy trong nước hay không), chi tiết để ngoài chuỗi.
+- Phân loại đơn vị kiểm tra xe cũ và đăng kiểm (chỉ ghi km) nếu cần quyền khác nhau.
+- Khôi phục chủ xe mất ví: một đơn vị đề xuất, thành viên khác xác nhận.
+- Máy chủ bằng chứng, Besu, Postgres, đo gas.
 
 ## Phụ lục A — Tài khoản và dữ liệu mẫu
 
-| Tài khoản Hardhat | Vai trò | Tên hiển thị |
-|---|---|---|
-| #0–#3 | Hội đồng | — |
-| #4 | Workshop | Đại lý ủy quyền A |
-| #5 | Workshop | Gara độc lập C |
-| #6 | Insurer | Công ty bảo hiểm B |
-| #7 | Inspector | Trung tâm đăng kiểm D |
-| #8–#19 | Chủ xe | — |
+Hardhat: tài khoản 0–3 hội đồng; **4 Đại lý A, 5 Gara C, 6 Công ty bảo hiểm B, 7 Trung tâm đăng kiểm D** (cùng vai trò Đơn vị xác nhận); 8–19 chủ xe.
 
-Xe minh họa (`shared/demo.mjs`, xem thêm ngăn 🧪 trên web):
-
-| VIN | Tình huống | Tem hiện tại | Chủ xe |
-|---|---|---|---|
-| `RLXDEMA0000000123` | A — thủy kích 02/10/2025, chủ xe ký cho Gara C tiếp nhận, sửa | `T-004512` | #8 |
-| `RLXDEMB0000000ABC` | B — xe sạch, chủ xe sẽ khai báo | `T-004501` | #9 |
-| `RLXDEMC0000WTY001` | C — giao xe bảo hành 180 ngày | `T-004502` | #14 (người mua) |
-| `RLXDEMD0000GAP001` | Sửa lén: kiểm định thấy mất tem, chưa kiểm tra lại | `T-004504` (trên máy không có) | #11 |
-| `RLXDEME000SEAL001` | Hồ sơ sạch, thử tem lạ | `T-004505` | #12 |
-| `RLXDEMF0000REP001` | Chủ xe đã khai báo, chờ gara | `T-004506` | #13 |
-| `RLXDEMG0000PAPER1` | Tiếp nhận bằng phiếu giấy, bảo dưỡng định kỳ | `T-004508` | #15 |
-| `RLXDEMH000RECHK01` | Mở máy ngoài hệ thống, đã kiểm tra lại và niêm phong | `T-004510` | #16 |
-| `RLXDEMZ9999999999` | Đúng định dạng, chưa đăng ký | — | — |
-
-Xe ngẫu nhiên: `RLXDEMR0000000001`…
+| Xe (VIN giả, tiền tố RLXDEM) | Câu chuyện nghiệp vụ |
+|---|---|
+| `RLXDEMA0000000123` | Thủy kích, bảo hiểm ghi, Gara C sửa và dán tem mới |
+| `RLXDEMB0000000ABC` | Xe sạch, hồ sơ liên tục |
+| `RLXDEMC0000WTY001` | Đại lý bán kèm bảo hành 180 ngày |
+| `RLXDEMD0000GAP001` | Sửa xong rồi bị mở máy ngoài hệ thống, đăng kiểm thấy mất tem |
+| `RLXDEME000SEAL001` | Hồ sơ sạch, dùng để thử tem lạ |
+| `RLXDEMF0000REP001` | Chủ xe khai báo ngập, chờ kiểm tra |
+| `RLXDEMH000RECHK01` | Mở máy ngoài hệ thống, sau đó Gara C kiểm tra lại, dán tem mới |
+| `RLXDEMJ0000ENG001` | Thủy kích rồi thay động cơ |
+| `RLXDEMK0000SLV001` | Tổn thất toàn bộ, bảo hiểm nhận xe rồi bán lại |
+| `RLXDEMZ9999999999` | Đúng định dạng, chưa đăng ký |
 
 ## Phụ lục B — Bản đồ mã nguồn
 
-```
-contracts/FloodRecord.sol   hợp đồng
-test/FloodRecord.test.js    34 test
-scripts/deploy.js           triển khai, cấp quyền 2/3, ghi web/src/contract.json (+ danh bạ orgs)
-scripts/seed.js             dữ liệu mẫu (tham số: số xe)
-shared/demo.mjs             VIN, số tem, chủ xe của xe minh họa (dùng chung)
-web/e2e/run.mjs             kiểm thử trình duyệt (npm --prefix web run e2e)
-scripts/scenarios.js        chạy A, B, C, T1, T4, T5
-scripts/lib.js              kết nối node, hash VIN/tem, đọc hồ sơ
-shared/status.mjs           kết luận tra cứu, nhãn, dịch lỗi
-evidence/hash.js, store.js  hash chứng từ, kho SQLite
-web/src/Lookup.jsx          tra cứu công khai
-web/src/Owner.jsx           chủ xe khai báo (3 bước)
-web/src/Members.jsx         khu vực thành viên = Staff.jsx + Council.jsx
-web/src/demo.js             dữ liệu minh họa cho ngăn 🧪
-web/src/chain.js            provider, tài khoản, ghi giao dịch (staticCall trước)
-infra/README.md             kế hoạch Besu + PostgreSQL (chưa triển khai)
-```
+| Đường dẫn | Nội dung |
+|---|---|
+| `contracts/FloodRecord.sol` | Hợp đồng lõi |
+| `test/FloodRecord.test.js` | 35 test hợp đồng |
+| `scripts/deploy.js`, `seed.js`, `scenarios.js`, `lib.js` | Triển khai, dữ liệu mẫu, kịch bản nghiệp vụ |
+| `shared/status.mjs`, `shared/demo.mjs` | Logic kết luận dùng chung; dữ liệu minh họa |
+| `evidence/` | Hash chứng từ chuẩn hóa, kho SQLite |
+| `web/src/Lookup.jsx` | Trang tra cứu công khai |
+| `web/src/Owner.jsx` | Chủ xe: khai báo, chuyển chủ, bảo hành |
+| `web/src/Staff.jsx` | Khu làm việc theo VIN: nhập một lần, ô việc theo tình trạng xe, đính kèm tệp |
+| `web/src/Council.jsx` | Hội đồng: đề xuất, bỏ phiếu |
+| `web/e2e/run.mjs` | 47 kiểm tra trên trình duyệt thật |

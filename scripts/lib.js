@@ -22,7 +22,7 @@ async function connect() {
 const normalizeVin = (v) => String(v ?? "").replace(/[\s-]/g, "").toUpperCase();
 const isValidVin = (v) => /^[A-HJ-NPR-Z0-9]{17}$/.test(normalizeVin(v));
 const vinHash = (vin) => id(normalizeVin(vin));
-const serial = (s) => id("seal:" + s);                          // số tem in trên tem → bytes32
+const serial = (s) => id("seal:" + String(s).replace(/\s+/g, "").toUpperCase());                          // số tem in trên tem → bytes32
 const evidence = (kind, data) => put({ kind, ...data });        // lưu ngoài chuỗi, trả hash
 const wait = async (txPromise) => (await txPromise).wait();
 const nowSec = async () => (await provider.getBlock("latest")).timestamp;
@@ -38,13 +38,12 @@ async function load(view, vin) {
   const vehicle = {
     exists: v.exists, owner: v.owner, flood: v.flood, hydrolock: v.hydrolock, totalLoss: v.totalLoss,
     unrecordedOpening: v.unrecordedOpening, openRequest: Number(v.openRequest), currentSeal: v.currentSeal,
-    custodian: v.custodian,
     handoverAt: Number(v.handoverAt), warrantyDays: Number(v.warrantyDays), sealAtHandover: v.sealAtHandover,
-    handoverHash: v.handoverHash,
+    engineHash: v.engineHash,
   };
   const records = recs.map((r) => ({
     kind: Number(r.kind), actor: r.actor, occurredAt: Number(r.occurredAt), recordedAt: Number(r.recordedAt),
-    sub: Number(r.sub), dataHash: r.dataHash, seal: r.seal, num: Number(r.num),
+    sub: Number(r.sub), dataHash: r.dataHash, ref: r.ref, num: Number(r.num),
   }));
   const amended = [];
   for (let i = 0; i < records.length; i++) if (await view.isAmended(k, i)) amended.push(i);

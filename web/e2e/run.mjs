@@ -38,6 +38,7 @@ const form = (title) => `//form[.//h3[contains(.,"${title}")]]`;
 const clear = async (el) => { await el.click(); await page.keyboard.down("Control"); await page.keyboard.press("KeyA"); await page.keyboard.up("Control"); await page.keyboard.press("Backspace"); };
 const ACCT = '//button[@aria-label="Chọn tài khoản (mô phỏng ví)"]';
 const DEMOBTN = '//button[@aria-label="Dữ liệu minh họa để chạy thử"]';
+let clicks = 0; // đếm thao tác bấm/gõ của người dùng ở khu thành viên (để theo dõi độ gọn)
 
 async function fillIn(formXp, label, text) {
   const el = await X(`${formXp}//label[contains(.,"${label}")]//input | ${formXp}//label[contains(.,"${label}")]//textarea`);
@@ -51,10 +52,16 @@ async function statusOf(formXp) {
   return (await X(`${formXp}//*[@role="status"]`)).evaluate((n) => n.innerText);
 }
 async function submit(title) { await (await X(`${form(title)}//button[@type="submit" or not(@type)]`)).click(); return statusOf(form(title)); }
+// Thành công ở khu làm việc: biểu mẫu đóng lại, thông báo hiện ở đầu khu
+async function submitDone(title) {
+  await (await X(`${form(title)}//button[@type="submit" or not(@type)]`)).click();
+  await page.waitForSelector('::-p-xpath(//p[@role="status"][contains(.,"✔")])', { timeout: 15000 });
+  return (await X('//p[@role="status"][contains(.,"✔")]')).evaluate((n) => n.innerText);
+}
 async function submitBtn(label) { const f = `//form[.//button[contains(.,"${label}")]]`; await (await X(`${f}//button[contains(.,"${label}")]`)).click(); return statusOf(f); }
 async function nav(name) { await (await X(`//nav//button[contains(.,"${name}")]`)).click(); await wait(500); }
 async function account(i) { await (await X(ACCT)).click(); await page.select(".pop select", String(i)); await wait(250); await (await X(ACCT)).click(); await wait(300); }
-async function openMembers() { await (await X(ACCT)).click(); await (await X('//div[@role="dialog"]//button[contains(.,"Mở khu vực thành viên")]')).click(); await wait(600); }
+async function openMembers() { await (await X(ACCT)).click(); await (await X('//div[@role="dialog"]//button[contains(.,"Mở khu vực thành viên")]')).click(); await wait(800); }
 async function checkVin(vin) {
   const el = await X('//label[contains(.,"Số khung")]//input');
   await clear(el); await el.type(vin);
@@ -67,6 +74,13 @@ async function demo(vin, label) {
   await wait(1500);
   return bodyText();
 }
+// Khu làm việc: nhập số khung một lần, rồi chọn việc từ các ô gợi ý
+async function ws(vin) {
+  const el = await X('//input[@aria-label="Số khung đang xử lý"]');
+  await clear(el); await el.type(vin);
+  await (await X('//button[contains(.,"Mở hồ sơ")]')).click(); clicks += 2; await wait(1200);
+}
+async function tile(name) { await (await X(`//button[contains(@class,"tile")][contains(.,"${name}")]`)).click(); clicks++; await wait(250); }
 const gotoVin = async (vin) => { await page.goto(`${BASE}/?vin=${vin}`, { waitUntil: "networkidle0" }); return bodyText(); };
 
 // 1) Trang chủ
@@ -80,24 +94,24 @@ check("VIN sai định dạng ('123') bị chặn kèm hướng dẫn", (await b
 
 // 2) Tra cứu qua ngăn demo
 t = await demo(V.honest, "Nhập đúng số tem");
-check("A: có ghi nhận thủy kích, tem khớp", t.includes("Có ghi nhận ngập, thủy kích") && t.includes("Khớp tem cuối trên hồ sơ"));
-check("A: hiện đơn vị sửa và nhãn Đã xác thực", t.includes("Đã sửa chữa bởi Gara độc lập C") && t.includes("Đã xác thực"));
-check("A: hiện 'Hồ sơ bắt đầu từ ngày'", t.includes("Hồ sơ bắt đầu từ ngày"));
-check("A: dòng thời gian có tiếp nhận do chủ xe ký và lý do phá tem", t.includes("Tiếp nhận xe vào xưởng") && t.includes("chủ xe ký tiếp nhận") && t.includes("Lý do: sửa do ngập"));
-check("A: không lộ địa chỉ ví, không hiện số tem", !/0x[0-9a-fA-F]{6}/.test(t.replace(/T-004512/g, "")) && !t.includes("Không ghi nhận"));
+check("Xe từng thủy kích: có ghi nhận, tem khớp", t.includes("Có ghi nhận ngập, thủy kích") && t.includes("Khớp tem cuối trên hồ sơ"));
+check("Hiện đơn vị sửa và nhãn Đã xác thực", t.includes("Đã sửa chữa bởi Gara độc lập C") && t.includes("Đã xác thực"));
+check("Hiện 'Hồ sơ bắt đầu từ ngày' và lý do thay tem", t.includes("Hồ sơ bắt đầu từ ngày") && t.includes("Lý do: sửa do ngập"));
+check("Không lộ địa chỉ ví, không hiện số tem", !/0x[0-9a-fA-F]{6}/.test(t.replace(/T-004512/g, "")) && !t.includes("Không ghi nhận"));
 await page.screenshot({ path: path.join(SHOTS, "1-lookup.png"), fullPage: true });
 t = await demo(V.recheck, "Nhập đúng số tem mới");
-check("Đã kiểm tra lại: hồ sơ liên tục + dòng kiểm tra lại", t.includes("Không có ghi nhận, hồ sơ liên tục") && t.includes("đã được kiểm tra lại và niêm phong"));
-check("Đã kiểm tra lại: hiện người kiểm tra", t.includes("Đã kiểm tra lại và niêm phong bởi Gara độc lập C"));
-await page.screenshot({ path: path.join(SHOTS, "1b-recheck.png"), fullPage: true });
-t = await demo(V.paper, "Nhập đúng số tem");
-check("Phiếu giấy: hồ sơ liên tục, lý do phá tem 'bảo dưỡng'", t.includes("Không có ghi nhận, hồ sơ liên tục") && t.includes("phiếu giấy") && t.includes("bảo dưỡng định kỳ"));
+check("Đã kiểm tra lại: hồ sơ liên tục + dòng kiểm tra lại", t.includes("Không có ghi nhận, hồ sơ liên tục") && t.includes("đã được kiểm tra lại ngày"));
+check("Đã kiểm tra lại: hiện đơn vị kiểm tra", t.includes("Đã kiểm tra lại bởi Gara độc lập C"));
+t = await demo(V.engine, "Nhập đúng số tem");
+check("Thay động cơ: vẫn có cờ thủy kích, nêu việc thay động cơ", t.includes("Có ghi nhận ngập, thủy kích") && t.includes("Đã thay động cơ 1 lần"));
+t = await demo(V.salvage, "Nhập đúng số tem");
+check("Thanh lý xe tổn thất: cờ còn, nêu 2 lần chuyển chủ", t.includes("tổn thất toàn bộ") && t.includes("Đã chuyển chủ 2 lần"));
 t = await demo(V.gap, "Trên máy không có tem");
 check("Sửa lén chưa kiểm tra lại: cảnh báo mở máy ngoài hệ thống", t.includes("Máy từng được mở ngoài hệ thống") && t.includes("chưa được gara thành viên kiểm tra lại"));
 t = await demo(V.unknown, "Tra cứu");
 check("Số khung chưa đăng ký: có khoảng trống", t.includes("Có khoảng trống"));
 
-// 3) Chủ xe: đối chiếu → khai báo → cho gara tiếp nhận
+// 3) Chủ xe: đối chiếu → khai báo
 await nav("Chủ xe khai báo");
 await account(12);
 t = await checkVin(V.clean);
@@ -110,98 +124,126 @@ await fillIn(ow, "Độ ngập", "40"); await fillIn(ow, "Thời gian ngâm", "2
 await (await X(ow + '//label[contains(.,"chết máy")]//input')).click();
 await (await X(ow + "//button")).click();
 let msg = await statusOf(ow);
-check("Khai báo chết máy → Mức 3 + lời khuyên", msg.includes("Mức 3") && msg.includes("KHÔNG khởi động lại"), msg);
-const ci = '//form[.//button[contains(.,"Cho phép gara tiếp nhận xe")]]';
-const gC = await (await X(ci + "//select")).evaluate((s) => [...s.options].find((o) => o.text.includes("Gara độc lập C")).value);
-await chooseIn(ci, "Gara tiếp nhận", gC);
-await (await X(ci + "//button")).click();
-await wait(1500);
-t = await bodyText();
-check("Chủ xe cho Gara C tiếp nhận; nút chuyển thành 'Nhận xe về'", t.includes("Xe đang ở xưởng của Gara độc lập C") && t.includes("Nhận xe về"));
+check("Khai báo chết máy → Mức 3 + lời khuyên đưa xe tới đơn vị xác nhận", msg.includes("Mức 3") && msg.includes("KHÔNG khởi động lại") && msg.includes("đơn vị đăng kiểm"), msg);
+check("Trang chủ xe chỉ còn 4 bước, không còn bước chọn gara", !(await bodyText()).includes("Cho phép gara tiếp nhận xe"));
 await page.screenshot({ path: path.join(SHOTS, "2-owner.png"), fullPage: true });
 
-// 4) Khu vực thành viên: chống ghi khống, đóng yêu cầu, bàn giao
-await account(4); // Đại lý A — không giữ xe
+// 4) Chủ xe chuyển chủ (mua bán cá nhân)
+await account(12);
+await checkVin(V.fakeSeal);
+const tr = '//form[.//button[contains(.,"Chuyển chủ")]]';
+const buyer = await (await X(tr + "//select")).evaluate((s) => [...s.options].find((o) => o.text.startsWith("#15")).value);
+await chooseIn(tr, "Chủ mới", buyer);
+await fillIn(tr, "Bảo hành", "30");
+await (await X(tr + "//button")).click();
+await page.waitForSelector('::-p-xpath(//p[@role="status"][contains(.,"Đã chuyển chủ")])', { timeout: 15000 });
+msg = (await bodyText());
+check("Chủ xe ký chuyển chủ kèm bảo hành 30 ngày", msg.includes("Đã chuyển chủ"), msg);
+t = await checkVin(V.fakeSeal);
+check("Chủ cũ không còn là chủ xe sau khi chuyển", t.includes("không phải chủ xe hiện tại"));
+
+// 5) Khu làm việc: nhập VIN một lần, chọn việc
+await account(5); // Gara C
 await openMembers();
-await fill("Kiểm tra và đóng yêu cầu", "Số khung", V.clean);
-await choose("Kiểm tra và đóng yêu cầu", "Kết luận", 3);
-msg = await submit("Kiểm tra và đóng yêu cầu");
-check("Gara không giữ xe ghi kết luận → bị chặn (chống ghi khống)", msg.includes("chưa được tiếp nhận vào xưởng của bạn"), msg);
-await account(5); // Gara C — đang giữ xe
-await fill("Kiểm tra và đóng yêu cầu", "Số khung", V.clean);
-await choose("Kiểm tra và đóng yêu cầu", "Kết luận", 3);
-msg = await submit("Kiểm tra và đóng yêu cầu");
-check("Gara đang giữ xe đóng yêu cầu, kết luận thủy kích", msg.includes("Đã đóng yêu cầu"), msg);
-await fill("Bàn giao xe", "Số khung", V.clean);
-msg = await submit("Bàn giao xe");
-check("Gara bàn giao xe", msg.includes("Đã bàn giao xe"), msg);
-await fill("Kiểm tra và đóng yêu cầu", "Số khung", V.clean);
-msg = await submit("Kiểm tra và đóng yêu cầu");
-check("Sau bàn giao gara hết quyền ghi", msg.includes("chưa được tiếp nhận vào xưởng của bạn"), msg);
+await ws(V.clean);
+t = await bodyText();
+check("Mở hồ sơ: hiện cảnh báo chủ xe đang chờ + ô gợi ý việc cần làm", t.includes("đang chờ kiểm tra") && t.includes("Kiểm tra xe") && t.includes("Ghi nhận ngập") && t.includes("Thay tem") && t.includes("Thay động cơ"));
+check("Xe chưa ngập: không có ô 'Sửa xong' và 'Chuyển chủ'", !t.includes("Sửa xong") && !t.includes("Chuyển chủ"));
+await tile("Kiểm tra xe");
+await fill("Kiểm tra xe", "Số km", "15100");
+await fill("Kiểm tra xe", "Số tem đọc được", SL.clean);
+await choose("Kiểm tra xe", "Kết luận về ngập", 4);
+clicks += 3;
+msg = await submitDone("Kiểm tra xe"); clicks++;
+check("Gara kết luận thủy kích: một biểu mẫu, đóng yêu cầu của chủ xe", msg.includes("thủy kích"), msg);
+t = await bodyText();
+check("Hồ sơ tự cập nhật: cờ thủy kích, hết cảnh báo chờ, hiện ô 'Sửa xong'", t.includes("Thủy kích") && !t.includes("đang chờ kiểm tra") && t.includes("Sửa xong"));
+await page.screenshot({ path: path.join(SHOTS, "3-workspace.png"), fullPage: true });
+check(`Ca kiểm tra + kết luận chỉ cần ${clicks} thao tác (đã gồm nhập VIN)`, clicks <= 10, `${clicks}`);
 
-// 5) Phiếu giấy: Gara C đề xuất, Insurer xác nhận, phá tem vì bảo dưỡng
-await fill("Tiếp nhận bằng phiếu giấy", "Số khung", V.fakeSeal);
-await fill("Tiếp nhận bằng phiếu giấy", "Số phiếu", "PTN-0001");
-msg = await submit("Tiếp nhận bằng phiếu giấy");
-const pid = (msg.match(/Mã phiếu tiếp nhận: (\d+)/) || [])[1];
-check("Gara C gửi phiếu tiếp nhận giấy, nhận mã phiếu", pid !== undefined, msg);
-await fill("Xác nhận phiếu tiếp nhận giấy", "Mã phiếu", pid);
-msg = await submit("Xác nhận phiếu tiếp nhận giấy");
-check("Gara tự xác nhận phiếu của mình bị từ chối", msg.includes("Cần một thành viên khác"), msg);
-await account(6);
-await fill("Xác nhận phiếu tiếp nhận giấy", "Mã phiếu", pid);
-msg = await submit("Xác nhận phiếu tiếp nhận giấy");
-check("Insurer xác nhận phiếu giấy", msg.includes("Đã xác nhận"), msg);
+// 6) Sửa xong + thay tem, hai bước trên cùng VIN không phải nhập lại VIN
+await tile("Sửa xong");
+await fill("Sửa xong", "Số tem mới", "T-009100");
+msg = await submitDone("Sửa xong");
+check("Sửa xong kèm tem mới trong một lần ghi", msg.includes("Đã ghi sửa xong"), msg);
+await tile("Thay tem");
+await fill("Thay tem", "Số tem mới", "T-009100");
+msg = await submit("Thay tem");
+check("Dùng lại số tem bị từ chối", msg.includes("mỗi số tem chỉ dùng một lần"), msg);
+await page.screenshot({ path: path.join(SHOTS, "3b-seal-reuse.png"), fullPage: true });
+
+// 7) Thành viên khác, cùng khu làm việc
+await ws("ABC-123");
+check("Số khung sai định dạng bị chặn ở khu làm việc", (await bodyText()).includes("phải có đúng 17 ký tự"));
+await account(6); // bảo hiểm
+await ws(V.pending);
+await tile("Tổn thất toàn bộ");
+msg = await submitDone("Tổn thất toàn bộ");
+check("Bảo hiểm ghi tổn thất toàn bộ cho xe bất kỳ (không cần tiếp nhận)", msg.includes("Đã ghi tổn thất"), msg);
+await account(7); // đăng kiểm
+await ws(V.warranty);
+await tile("Kiểm tra xe");
+await fill("Kiểm tra xe", "Số km", "9000");
+await fill("Kiểm tra xe", "Số tem đọc được", SL.warranty);
+msg = await submitDone("Kiểm tra xe");
+check("Đăng kiểm ghi mốc km, chỉ đọc số liệu", msg.includes("Đã ghi kiểm tra"), msg);
+await ws(V.gap);
+await tile("Kiểm tra xe");
+await fill("Kiểm tra xe", "Số km", "40500");
+await chooseIn(form("Kiểm tra xe"), "Tem trên máy", "none");
+msg = await submitDone("Kiểm tra xe");
+check("Đăng kiểm ghi 'không thấy tem' (ô nhập số tem tự ẩn)", msg.includes("Đã ghi kiểm tra"), msg);
+
+// 8) Thay động cơ, đăng ký xe, đính chính
 await account(5);
-await fill("Phá tem", "Số khung", V.fakeSeal);
-await fill("Phá tem", "Số tem đang gắn", SL.fakeSeal);
-await choose("Phá tem", "Lý do", 0);
-msg = await submit("Phá tem");
-check("Gara C (qua phiếu giấy) phá tem với lý do bảo dưỡng", msg.includes("Đã ghi phá tem"), msg);
-await page.screenshot({ path: path.join(SHOTS, "3-members.png"), fullPage: true });
-
-// 6) Insurer, Inspector không cần tiếp nhận
+await ws(V.recheck);
+await tile("Thay động cơ");
+await fill("Thay động cơ", "Số máy mới", "eng-new-777");
+msg = await submitDone("Thay động cơ");
+check("Gara ghi thay động cơ", msg.includes("Đã ghi thay động cơ"), msg);
+await account(4); // Đại lý A
+await ws(webTestVin(1));
+check("Số khung chưa có hồ sơ: hiện biểu mẫu đăng ký", (await bodyText()).includes("chưa có hồ sơ"));
+const ownerOpt = await (await X(form("đăng ký xe") + "//label[contains(.,\"Chủ xe\")]//select")).evaluate((s) => [...s.options].find((o) => o.text.startsWith("#8")).value);
+await chooseIn(form("đăng ký xe"), "Chủ xe", ownerOpt);
+await fill("đăng ký xe", "Số tem", "t-009001"); // gõ thường, hệ thống tự chuẩn hóa
+await fill("đăng ký xe", "Số máy", "E-WEB-1");
+msg = await submitDone("đăng ký xe");
+check("Đơn vị xác nhận đăng ký xe kèm tem và số máy", msg.includes("Đã đăng ký xe"), msg);
 await account(6);
-await fill("Tổn thất toàn bộ", "Số khung", V.pending);
-msg = await submit("Tổn thất toàn bộ");
-check("Insurer ghi tổn thất toàn bộ khi xe không ở xưởng", msg.includes("Đã ghi tổn thất"), msg);
-await account(7);
-await fill("Mốc kiểm định", "Số khung", V.warranty);
-await fill("Mốc kiểm định", "Số km", "9000");
-await fill("Mốc kiểm định", "Số tem thấy", SL.warranty);
-msg = await submit("Mốc kiểm định");
-check("Inspector ghi mốc kiểm định", msg.includes("Đã ghi mốc"), msg);
+await ws(V.honest);
+await tile("Đính chính");
+msg = await submitDone("Đề xuất đính chính");
+check("Bảo hiểm đề xuất đính chính sự kiện do mình ghi", msg.includes("Đã đề xuất đính chính"), msg);
+await account(5);
+t = await bodyText();
+check("Đơn vị khác thấy mục 'Chờ bạn ký' (không phải gõ mã)", t.includes("Chờ bạn ký"));
+await (await X('//div[contains(@class,"pending")]//button[contains(.,"Ký")]')).click();
+await page.waitForSelector('::-p-xpath(//p[@role="status"][contains(.,"đã đính chính")])', { timeout: 15000 });
+check("Ký đính chính một lần bấm", true);
 
-// 7) Hội đồng 2/3, Workshop mới
+// 9) Hội đồng 2/3 cấp quyền cho đơn vị mới
 await account(0);
+check("Hội đồng không còn biểu mẫu phát hành số tem", !(await bodyText()).includes("Phát hành số tem"));
 await choose("Đề xuất cấp quyền ghi", "Tài khoản", await (await X(form("Đề xuất cấp quyền ghi") + "//select")).evaluate((s) => [...s.options].find((o) => o.text.startsWith("#18")).value));
 await choose("Đề xuất cấp quyền ghi", "Vai trò", 2);
 msg = await submit("Đề xuất cấp quyền ghi");
-check("Hội đồng #0 đề xuất cấp quyền Workshop cho #18", msg.includes("Đã đề xuất"), msg);
+check("Hội đồng #0 đề xuất cấp quyền đơn vị xác nhận cho #18", msg.includes("Đã đề xuất"), msg);
 for (const i of [1, 2]) {
   await account(i);
   await (await X('//li[contains(.,"Cấp quyền")][1]//button[contains(.,"Bỏ phiếu")]')).click();
   await wait(1200);
 }
 check("Đủ 2/3 phiếu → 'đã thực hiện'", (await bodyText()).includes("đã thực hiện"));
-await account(0);
-await fill("Phát hành số tem", "Danh sách", "T-009001\nT-009002");
-msg = await submit("Phát hành số tem");
-check("Hội đồng phát hành 2 số tem", msg.includes("Đã phát hành 2"), msg);
 await account(18);
-await fill("Đăng ký xe + đặt tem", "Số khung", webTestVin(1));
-await fill("Đăng ký xe + đặt tem", "Số tem", "T-009001");
-msg = await submit("Đăng ký xe + đặt tem");
-check("Workshop mới đăng ký xe", msg.includes("Đã đăng ký xe"), msg);
-await fill("Đăng ký xe + đặt tem", "Số khung", "ABC-123");
-msg = await submit("Đăng ký xe + đặt tem");
-check("Form ghi chặn VIN sai định dạng", msg.includes("phải có đúng 17 ký tự"), msg);
-await fill("Đăng ký xe + đặt tem", "Số khung", webTestVin(2));
-await fill("Đăng ký xe + đặt tem", "Số tem", "T-009001");
-msg = await submit("Đăng ký xe + đặt tem");
-check("Dùng lại số tem bị từ chối", msg.includes("Số tem chưa được hội đồng phát hành hoặc đã dùng"), msg);
+await ws(webTestVin(2));
+const ownerOpt2 = await (await X(form("đăng ký xe") + "//label[contains(.,\"Chủ xe\")]//select")).evaluate((s) => [...s.options].find((o) => o.text.startsWith("#9")).value);
+await chooseIn(form("đăng ký xe"), "Chủ xe", ownerOpt2);
+msg = await submitDone("đăng ký xe");
+check("Đơn vị mới được cấp quyền đăng ký xe không cần tem", msg.includes("Đã đăng ký xe"), msg);
+await page.screenshot({ path: path.join(SHOTS, "4-members.png"), fullPage: true });
 
-// 8) Bảo hành qua ngăn demo
+// 10) Chủ xe gửi yêu cầu bảo hành qua ngăn demo
 await (await X(DEMOBTN)).click();
 await (await X(`//li[contains(.,"${V.warranty} —")]//button[contains(.,"Chủ xe gửi yêu cầu bảo hành")]`)).click();
 await wait(800);
@@ -210,9 +252,11 @@ check("Demo bảo hành: còn hạn", t.includes("Còn trong thời hạn bảo 
 msg = await submitBtn("Gửi yêu cầu bảo hành");
 check("Chủ xe gửi yêu cầu bảo hành", msg.includes("Đã ghi yêu cầu bảo hành"), msg);
 
-// 9) Tra cứu xe vừa tạo + điện thoại
+// 11) Tra cứu xe vừa tạo / vừa đính chính + điện thoại
 t = await gotoVin(webTestVin(1));
-check("Xe mới: lịch sử 2 sự kiện, đang ở xưởng đơn vị đăng ký", t.includes("Lịch sử chi tiết (2 sự kiện)") && t.includes("Xe đang ở xưởng của"));
+check("Xe mới đăng ký qua web: tra cứu được, 1 sự kiện", t.includes("Lịch sử chi tiết (1 sự kiện)"));
+t = await gotoVin(V.honest);
+check("Sự kiện đã đính chính được đánh dấu, vẫn còn trong lịch sử", t.includes("đã đính chính") && t.includes("Đính chính sự kiện số"));
 await page.setViewport({ width: 390, height: 800 });
 for (const v of [V.gap, V.honest]) {
   await gotoVin(v);
@@ -220,9 +264,9 @@ for (const v of [V.gap, V.honest]) {
 }
 await (await X(DEMOBTN)).click();
 check("390px: ngăn demo nằm trong khung nhìn", await page.evaluate(() => { const r = document.querySelector(".pop").getBoundingClientRect(); return r.left >= 0 && r.right <= window.innerWidth; }));
-await page.screenshot({ path: path.join(SHOTS, "4-mobile-demo.png") });
+await page.screenshot({ path: path.join(SHOTS, "5-mobile-demo.png") });
 
 console.log("Lỗi console/page:", consoleErrors.length ? consoleErrors : "không có");
 await browser.close();
 console.log(`${results.filter(Boolean).length}/${results.length} đạt`);
-process.exit(results.every(Boolean) ? 0 : 1);
+process.exit(results.every(Boolean) && consoleErrors.length === 0 ? 0 : 1);

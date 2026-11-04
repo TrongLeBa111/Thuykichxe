@@ -1,14 +1,18 @@
-// Dữ liệu mẫu theo proposal + phản biện Đợt 1 (tiếp nhận xe, lý do phá tem, niêm phong lại, VIN 17 ký tự).
+// Dữ liệu mẫu theo các quy trình nghiệp vụ: đại lý bán xe, bảo hiểm giám định / thanh lý, gara sửa chữa,
+// đăng kiểm, chủ xe tự khai báo, thay tem, thay động cơ, chuyển chủ.
 //   node scripts/seed.js          → 20 xe
 //   node scripts/seed.js 500      → 500 xe
 const { connect, ACC, vinHash, serial, evidence, wait, nowSec } = require("./lib");
+const { id } = require("ethers");
 const { DEMO_VINS: V, DEMO_SEALS: SL, DEMO_OWNERS: OW, randomVin } = require("../shared/demo.mjs");
 
 const FT = { Floor: 0, Engine: 1, Hydrolock: 2 };
-const BR = { Maintenance: 0, NonFloodRepair: 1, FloodRepair: 2, EngineReplacement: 3 };
+const CL = { NotAssessed: 0, NoFlood: 1, Floor: 2, Engine: 3, Hydrolock: 4 };
+const SR = { Maintenance: 0, NonFloodRepair: 1, FloodRepair: 2, EngineReplacement: 3 };
 const T_FLOOD_HN = Math.floor(Date.UTC(2025, 9, 2) / 1000); // 02/10/2025 – ngập Hà Nội
 const N = Number(process.argv[2] || process.env.SEED_VEHICLES || 20);
 const ZERO = "0x" + "0".repeat(64);
+const engineHash = (s) => id("engine:" + s);
 
 async function main() {
   const { as, addrs, view } = await connect();
@@ -20,90 +24,73 @@ async function main() {
   let events = 0, vehicles = 0;
   const tx = async (p) => { await wait(p); events++; };
 
-  // ── Hội đồng phát hành số tem: các số đặt sẵn cho xe minh họa + dải T-004600… cho xe ngẫu nhiên ──
-  const named = Object.values(SL);
   const pool = [];
   for (let i = 0; i < N * 3 + 40; i++) pool.push(`T-${String(4600 + i).padStart(6, "0")}`);
-  const all = [...named, ...pool];
-  for (let i = 0; i < all.length; i += 150) await wait(as(ACC.council[0]).issueSeals(all.slice(i, i + 150).map(serial)));
   let cursor = 0;
   const nextSeal = () => pool[cursor++];
 
   const doc = (kind, vin, extra = {}) => evidence(kind, { vin, ...extra });
-  const register = async (vin, ownerIdx, seal, ws = agentA) => {
-    await tx(as(ws).registerVehicle(vinHash(vin), addrs[ownerIdx], serial(seal), doc("registration", vin, { seal })));
+  const register = async (vin, ownerIdx, seal, eng, by = agentA) => {
+    await tx(as(by).registerVehicle(vinHash(vin), addrs[ownerIdx], serial(seal), engineHash(eng || "E-" + vin), doc("registration", vin, { seal })));
     vehicles++;
   };
-  // Đăng ký xong xe vẫn ở đại lý; giao cho chủ xe = bàn giao (checkOut)
-  const out = (vin, by) => tx(as(by).checkOut(vinHash(vin), doc("check-out", vin)));
-  const checkIn = (vin, ownerIdx, ws) => tx(as(ownerIdx).checkIn(vinHash(vin), addrs[ws], doc("check-in", vin, { ws: addrs[ws] })));
   const flood = (vin, type, when, by = insurer) =>
     tx(as(by).reportFlood(vinHash(vin), type, when, doc("flood-report", vin, { type, note: "biên bản giám định, ảnh vết ngập" })));
-  const openSeal = (vin, s, reason, ws) => tx(as(ws).breakSeal(vinHash(vin), serial(s), reason, doc("seal-break", vin, { seal: s, reason })));
-  const repaired = (vin, newSeal, ws) =>
-    tx(as(ws).repairCompleted(vinHash(vin), newSeal ? serial(newSeal) : ZERO, doc("repair", vin, { newSeal, parts: "xi-lanh, tay biên, lọc gió" })));
-  const checkpoint = (vin, km, seen) =>
-    tx(as(inspector).inspectionCheckpoint(vinHash(vin), km, seen ? serial(seen) : ZERO, doc("inspection", vin, { km, seen })));
+  const repaired = (vin, newSeal, by) =>
+    tx(as(by).repairCompleted(vinHash(vin), newSeal ? serial(newSeal) : ZERO, doc("repair", vin, { newSeal, parts: "xi-lanh, tay biên, lọc gió" })));
+  // Một lần ghi kiểm tra: km, tem đọc được (null = không thấy tem), kết luận, tem mới (nếu dán lại)
+  const inspect = (vin, km, seen, concl = CL.NotAssessed, newSeal = null, by = inspector) =>
+    tx(as(by).inspect(vinHash(vin), km, seen ? serial(seen) : ZERO, concl, newSeal ? serial(newSeal) : ZERO, doc("inspection", vin, { km, seen, concl, newSeal })));
 
-  // ── A. Người bán trung thực: thủy kích 02/10/2025, sửa tại Gara C, tem hiện tại T-004512 ──
+  // ── Gara sửa thủy kích, ghi đủ: bảo hiểm ghi ngập 02/10/2025, Gara C sửa và dán tem mới T-004512 ──
   await register(V.honest, OW.honest, SL.honestFirst);
-  await out(V.honest, agentA);
-  await flood(V.honest, FT.Hydrolock, T_FLOOD_HN);              // bảo hiểm ghi theo hồ sơ bồi thường
-  await checkIn(V.honest, OW.honest, garageC);                  // chủ xe ký cho Gara C tiếp nhận
-  await openSeal(V.honest, SL.honestFirst, BR.FloodRepair, garageC);
+  await flood(V.honest, FT.Hydrolock, T_FLOOD_HN);
   await repaired(V.honest, SL.honest, garageC);
-  await out(V.honest, garageC);
-  await checkpoint(V.honest, 31200, SL.honest);
+  await inspect(V.honest, 31200, SL.honest);
 
-  // ── B. Xe sạch, hồ sơ liên tục ──
+  // ── Xe sạch, hồ sơ liên tục ──
   await register(V.clean, OW.clean, SL.clean);
-  await out(V.clean, agentA);
-  await checkpoint(V.clean, 15000, SL.clean);
+  await inspect(V.clean, 15000, SL.clean);
 
-  // ── C. Giao xe kèm bảo hành 180 ngày (giao xe = bàn giao) ──
+  // ── Đại lý bán xe kèm bảo hành 180 ngày (đại lý đứng tên xe trong kho, ký chuyển cho khách) ──
   await register(V.warranty, OW.warrantySeller, SL.warranty);
-  await checkpoint(V.warranty, 120, SL.warranty);
-  await tx(as(agentA).handover(vinHash(V.warranty), addrs[OW.warrantyBuyer], 180, doc("handover", V.warranty, { warrantyDays: 180, seal: SL.warranty })));
+  await inspect(V.warranty, 120, SL.warranty);
+  await tx(as(agentA).transfer(vinHash(V.warranty), addrs[OW.warrantyBuyer], 180, doc("transfer", V.warranty, { warrantyDays: 180, seal: SL.warranty })));
 
-  // ── Sửa lén (T5): sửa có ghi nhận, sau đó máy bị mở ngoài hệ thống, kiểm định thấy mất tem ──
+  // ── Sửa lén: sửa có ghi nhận, sau đó máy bị mở ngoài hệ thống, đăng kiểm thấy mất tem ──
   await register(V.gap, OW.gap, SL.gapFirst);
-  await out(V.gap, agentA);
   await flood(V.gap, FT.Hydrolock, T_FLOOD_HN + 86400);
-  await checkIn(V.gap, OW.gap, garageC);
-  await openSeal(V.gap, SL.gapFirst, BR.FloodRepair, garageC);
   await repaired(V.gap, SL.gap, garageC);
-  await out(V.gap, garageC);
-  await checkpoint(V.gap, 40000, null);
+  await inspect(V.gap, 40000, null);
 
   // ── Hồ sơ sạch, dùng để thử tem lạ ──
   await register(V.fakeSeal, OW.fakeSeal, SL.fakeSeal);
-  await out(V.fakeSeal, agentA);
-  await checkpoint(V.fakeSeal, 8000, SL.fakeSeal);
+  await inspect(V.fakeSeal, 8000, SL.fakeSeal);
 
   // ── Chủ xe khai báo, chờ gara ──
   await register(V.pending, OW.pending, SL.pending);
-  await out(V.pending, agentA);
   await tx(as(OW.pending).ownerReport(vinHash(V.pending), 40, 20, false, await nowSec(), doc("owner-report", V.pending, { depthCm: 40, soakMin: 20, stalled: false })));
 
-  // ── Tiếp nhận bằng phiếu giấy: chủ xe không có ví; Gara C đề xuất, Đại lý A xác nhận; bảo dưỡng thay gioăng ──
-  await register(V.paper, OW.paper, SL.paperFirst);
-  await out(V.paper, agentA);
-  await tx(as(garageC).proposeCheckIn(vinHash(V.paper), doc("paper-check-in", V.paper, { note: "phiếu tiếp nhận giấy có chữ ký chủ xe" })));
-  await tx(as(agentA).confirmCheckIn((await view.paperCheckInCount()) - 1n));
-  await openSeal(V.paper, SL.paperFirst, BR.Maintenance, garageC);
-  await tx(as(garageC).applySeal(vinHash(V.paper), serial(SL.paper), doc("seal-apply", V.paper, { seal: SL.paper })));
-  await out(V.paper, garageC);
-  await checkpoint(V.paper, 22000, SL.paper);
-
-  // ── Mở máy ngoài hệ thống rồi được kiểm tra lại: chủ xe thay gioăng ở gara ngoài, đăng kiểm thấy mất tem,
-  //    chủ xe mang xe tới Gara C kiểm tra lại và niêm phong ──
+  // ── Mở máy ngoài hệ thống rồi được kiểm tra lại: đăng kiểm thấy mất tem, chủ xe mang tới Gara C,
+  //    Gara C kiểm tra, kết luận không ngập và dán tem mới trong một lần ghi ──
   await register(V.recheck, OW.recheck, SL.recheckFirst);
-  await out(V.recheck, agentA);
-  await checkpoint(V.recheck, 10000, SL.recheckFirst);
-  await checkpoint(V.recheck, 18000, null);
-  await checkIn(V.recheck, OW.recheck, garageC);
-  await tx(as(garageC).reinspect(vinHash(V.recheck), 0, serial(SL.recheck), doc("reinspection", V.recheck, { conclusion: "không có dấu hiệu ngập", seal: SL.recheck })));
-  await out(V.recheck, garageC);
+  await inspect(V.recheck, 10000, SL.recheckFirst);
+  await inspect(V.recheck, 18000, null);
+  await inspect(V.recheck, 18050, null, CL.NoFlood, SL.recheck, garageC);
+
+  // ── Thủy kích rồi thay động cơ: Gara C thay máy, ghi số máy mới và dán tem mới ──
+  await register(V.engine, OW.engine, SL.engineFirst, "ENG-OLD-001");
+  await flood(V.engine, FT.Hydrolock, T_FLOOD_HN + 5 * 86400);
+  await tx(as(garageC).changeEngine(vinHash(V.engine), engineHash("ENG-NEW-002"), doc("engine-change", V.engine, { old: "ENG-OLD-001", new: "ENG-NEW-002" })));
+  await repaired(V.engine, SL.engine, garageC);
+
+  // ── Tổn thất toàn bộ rồi thanh lý: bảo hiểm ghi ngập và tổn thất, chủ xe ký chuyển cho bảo hiểm,
+  //    bảo hiểm bán lại cho người mua. Cờ đi theo xe. ──
+  await register(V.salvage, OW.salvageFirst, SL.salvage);
+  await flood(V.salvage, FT.Engine, T_FLOOD_HN + 3 * 86400);
+  await tx(as(insurer).declareTotalLoss(vinHash(V.salvage), doc("total-loss", V.salvage, { note: "quyết định bồi thường toàn bộ" })));
+  await tx(as(OW.salvageFirst).transfer(vinHash(V.salvage), addrs[insurer], 0, doc("transfer", V.salvage, { note: "chuyển cho bảo hiểm sau bồi thường" })));
+  await tx(as(insurer).transfer(vinHash(V.salvage), addrs[OW.salvageBuyer], 0, doc("transfer", V.salvage, { note: "bảo hiểm bán thanh lý" })));
 
   // ── Xe ngẫu nhiên (xác định) ──
   let seed = 20261101;
@@ -113,39 +100,36 @@ async function main() {
     const ws = rnd(2) ? agentA : garageC;
     const ownerIdx = ownerBase + (i % ownerCount);
     let seal = nextSeal();
-    await register(vin, ownerIdx, seal, ws);            // ws đang giữ xe cho tới khi bàn giao
+    await register(vin, ownerIdx, seal, null, ws);
     const kind = rnd(10); // 0–3 sạch · 4 ngập sàn · 5 ngập máy · 6–7 thủy kích đã sửa · 8 tổn thất toàn bộ · 9 sửa lén
     const when = T_FLOOD_HN + rnd(60) * 86400;
     if (kind <= 3) {
-      await out(vin, ws);
-      for (let k = 0, m = 1 + rnd(3); k < m; k++) await checkpoint(vin, 5000 * (k + 1) + rnd(900), seal);
+      for (let k = 0, m = 1 + rnd(3); k < m; k++) await inspect(vin, 5000 * (k + 1) + rnd(900), seal);
       continue;
     }
     if (kind <= 5) {
       await flood(vin, kind === 4 ? FT.Floor : FT.Engine, when, rnd(2) ? insurer : ws);
     } else if (kind <= 7 || kind === 9) {
       await flood(vin, FT.Hydrolock, when);
-      await openSeal(vin, seal, BR.FloodRepair, ws);
       seal = nextSeal();
       await repaired(vin, seal, ws);
     } else {
       await flood(vin, FT.Engine, when);
       await tx(as(insurer).declareTotalLoss(vinHash(vin), doc("total-loss", vin, { note: "quyết định bồi thường toàn bộ" })));
     }
-    await out(vin, ws);
-    if (kind !== 8) await checkpoint(vin, 20000 + rnd(30000), kind === 9 ? null : seal);
+    if (kind !== 8) await inspect(vin, 20000 + rnd(30000), kind === 9 ? null : seal);
   }
 
-  // ── Một đính chính mẫu: Insurer đề xuất đính chính ghi nhận ngập của xe ngẫu nhiên đầu tiên (nếu có) ──
+  // ── Một đính chính mẫu: bảo hiểm đề xuất đính chính ghi nhận ngập của xe ngẫu nhiên đầu tiên (nếu có) ──
   const first = randomVin(1);
   const hist = await view.getHistory(vinHash(first));
-  const idx = hist.findIndex((r) => Number(r.kind) === 3 && r.actor === addrs[insurer]);
+  const idx = hist.findIndex((r) => Number(r.kind) === 1 && r.actor === addrs[insurer]);
   if (idx >= 0) {
     await tx(as(insurer).proposeAmend(vinHash(first), idx, doc("amendment", first, { note: "đính chính mức độ ngập" })));
     await tx(as(garageC).coSignAmend(0)); // đề xuất đính chính duy nhất của seed → id 0
   }
 
-  console.log(`Seed xong: ${events} giao dịch, ${vehicles} xe, ${all.length} số tem phát hành.`);
+  console.log(`Seed xong: ${events} giao dịch, ${vehicles} xe.`);
   console.log("Xe minh họa:", Object.entries(V).map(([k, v]) => `${k}=${v}`).join(" · "));
 }
 main().catch((e) => { console.error(e); process.exit(1); });
