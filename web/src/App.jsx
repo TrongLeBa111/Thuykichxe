@@ -107,7 +107,7 @@ export default function App() {
 
       <main>
         {tab === "lookup" && <Lookup preset={preset} />}
-        {tab === "owner" && acct && <Owner key={ownerVin.n + ":" + idx} acct={acct} presetVin={ownerVin.vin} />}
+        {tab === "owner" && acct && <Owner key={ownerVin.n + ":" + idx} acct={acct} accounts={accounts} presetVin={ownerVin.vin} />}
         {tab === "members" && acct && <Members acct={acct} accounts={accounts} onRolesChanged={reload} />}
         {tab !== "lookup" && !acct && !err && <div className="wrap"><p className="muted" style={{ margin: 24 }}>Đang tải…</p></div>}
         {tab !== "lookup" && err && <div className="wrap"><p className="error">{err}</p></div>}

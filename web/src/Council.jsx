@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from "react";
 import { reader, write, eventArg } from "./chain.js";
-import { sealHashOf } from "./lookup.js";
 import { ActionForm, accountLabel, roleName } from "./ui.jsx";
 import { explainError } from "@shared/status.mjs";
 
@@ -61,7 +60,7 @@ export default function Council({ acct, accounts, onRolesChanged }) {
       {acct.role === 1 && (<>
       <ActionForm title="Đề xuất cấp quyền ghi" fields={[
         { name: "who", label: "Tài khoản", type: "select", options: addrOptions },
-        { name: "role", label: "Vai trò", type: "select", options: [[2, "Workshop"], [3, "Insurer"], [4, "Inspector"], [1, "Hội đồng"]] }]}
+        { name: "role", label: "Vai trò", type: "select", options: [[2, "Đơn vị xác nhận"], [1, "Hội đồng"]] }]}
         submit="Đề xuất" run={act(async (v) => { const r = await write(a, "proposeAddMember", [v.who, +v.role]); return `Đã đề xuất #${eventArg(r, "ProposalCreated", "id")} (bạn đã tính 1 phiếu).`; })} />
 
       <ActionForm title="Đề xuất thu hồi quyền" fields={[{ name: "who", label: "Tài khoản", type: "select", options: addrOptions }]}
@@ -71,13 +70,6 @@ export default function Council({ acct, accounts, onRolesChanged }) {
         { name: "d", label: "Độ ngập (cm)", type: "number", def: 30 }, { name: "s", label: "Thời gian ngâm (phút)", type: "number", def: 30 }]}
         submit="Đề xuất" run={act(async (v) => { const r = await write(a, "proposeThresholds", [+v.d, +v.s]); return `Đã đề xuất #${eventArg(r, "ProposalCreated", "id")}.`; })} />
 
-      <ActionForm title="Phát hành số tem" hint="Mỗi số chỉ dùng một lần trên chuỗi. Mỗi dòng một số tem."
-        fields={[{ name: "list", label: "Danh sách số tem", type: "area", placeholder: "Mỗi dòng một số tem" }]}
-        run={async (v) => {
-          const serials = v.list.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean);
-          await write(a, "issueSeals", [serials.map(sealHashOf)]);
-          return `Đã phát hành ${serials.length} số tem.`;
-        }} />
       </>)}
     </section>
   );

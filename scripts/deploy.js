@@ -1,11 +1,11 @@
 // Deploy FloodRecord với hội đồng 4 thành viên (tài khoản 0–3), cấp quyền bằng 2/3 phiếu,
-// phát hành lô số tem, ghi web/src/contract.json.
-// Tài khoản: 0–3 Hội đồng · 4 Đại lý A · 5 Gara C · 6 Insurer · 7 Inspector · 8–19 Chủ xe
+// ghi web/src/contract.json.
+// Tài khoản: 0–3 Hội đồng · 4 Đại lý A · 5 Gara C · 6 Bảo hiểm B · 7 Đăng kiểm D (đều là Đơn vị xác nhận) · 8–19 Chủ xe
 const fs = require("fs");
 const path = require("path");
 const { ethers, artifacts } = require("hardhat");
 
-const ROLE = { Workshop: 2, Insurer: 3, Inspector: 4 };
+const ROLE = { Attester: 2 };
 
 async function main() {
   const s = await ethers.getSigners();
@@ -20,10 +20,7 @@ async function main() {
     await (await c.connect(council[1]).approveProposal(id)).wait();
     await (await c.connect(council[2]).approveProposal(id)).wait();
   };
-  await grant(s[4], ROLE.Workshop);
-  await grant(s[5], ROLE.Workshop);
-  await grant(s[6], ROLE.Insurer);
-  await grant(s[7], ROLE.Inspector);
+  for (const i of [4, 5, 6, 7]) await grant(s[i], ROLE.Attester); // cùng một vai trò; loại đơn vị nằm ở danh bạ orgs
 
   const address = await c.getAddress();
   const { abi } = await artifacts.readArtifact("FloodRecord");
@@ -33,7 +30,7 @@ async function main() {
   const orgs = { [s[4].address]: "Đại lý ủy quyền A", [s[5].address]: "Gara độc lập C", [s[6].address]: "Công ty bảo hiểm B", [s[7].address]: "Trung tâm đăng kiểm D" };
   fs.writeFileSync(out, JSON.stringify({ address, abi, rpc: "http://127.0.0.1:8545", orgs }, null, 2));
   console.log("FloodRecord:", address);
-  console.log("Hội đồng 0–3, Workshop 4–5, Insurer 6, Inspector 7, Chủ xe 8–19");
+  console.log("Hội đồng 0–3, Đơn vị xác nhận 4–7, Chủ xe 8–19");
   console.log("Đã ghi", path.relative(process.cwd(), out));
 }
 main().catch((e) => { console.error(e); process.exit(1); });
